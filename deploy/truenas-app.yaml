@@ -5,13 +5,16 @@
 #      and use that uid:gid, so Burrow can read what that account can read and uploads are owned by it.
 #   2. Replace the three host paths below with your own.
 #   3. Create the state and drop folders first (mkdir -p), owned by that account.
+#   4. Open https://<truenas-ip>:47823 and accept the self-signed certificate. Setup asks
+#      for the key printed in the app's log.
 services:
   burrow:
     image: ghcr.io/xattribution/burrow:latest
     restart: unless-stopped
     user: "1000:1000"
     ports:
-      - "47823:47823"
+      - "47823:47823"   # the whole app, HTTPS: keep this one on your LAN
+      - "47824:47824"   # share links only, HTTPS: point your reverse proxy here
     environment:
       TZ: UTC
       BURROW_SCAN_HOURS: "6"

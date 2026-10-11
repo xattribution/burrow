@@ -26,6 +26,7 @@ case "$cmd" in
 LIBRARY=$(realpath "$LIB")
 DROP=$DIR/drop
 PORT=47823
+PUBLIC_PORT=47824
 PUID=$(id -u "$OWNER")
 PGID=$(id -g "$OWNER")
 TZ=$(cat /etc/timezone 2>/dev/null || echo UTC)
@@ -34,7 +35,8 @@ EOF
     chown -R "$OWNER": "$DIR"
     compose pull && compose up -d
     ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-    echo "Burrow is running. Open http://${ip:-localhost}:$(grep ^PORT "$DIR/.env" | cut -d= -f2) to finish setup."
+    echo "Burrow is running. Open https://${ip:-localhost}:$(grep ^PORT= "$DIR/.env" | cut -d= -f2) to finish setup (accept the self-signed certificate)."
+    echo "The setup key is in the log: docker logs burrow"
     ;;
   update)
     need_root

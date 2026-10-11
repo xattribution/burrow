@@ -70,15 +70,18 @@ Environment variables cover plumbing only. Everything a user changes lives in th
 
 | Env | Default | Meaning |
 |---|---|---|
-| `BURROW_ADDR` | `:47823` | listen address |
+| `BURROW_ADDR` | `:47823` | LAN port: the whole app |
+| `BURROW_PUBLIC_ADDR` | `:47824` | public port: share links only (`off` disables it) |
+| `BURROW_TLS_CERT`, `BURROW_TLS_KEY` | unset | certificate files, reloaded when they change; unset means a self-signed pair in `state/tls` |
+| `BURROW_TLS_PQ_ONLY` | `false` | refuse clients without hybrid post-quantum key exchange |
 | `BURROW_DATA` | `/data` | library root (read-only mount) |
 | `BURROW_DROP` | `/drop` | writable upload folder |
 | `BURROW_STATE` | `/state` | database and thumbnail cache |
 | `BURROW_SCAN_HOURS` | `6` | full rescan interval |
 | `BURROW_WATCH` | `true` | inotify live updates |
-| `BURROW_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128,172.16.0.0/12,100.64.0.0/10` | peers allowed to set X-Forwarded-* (loopback, Docker, Tailscale) |
+| `BURROW_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` | peers allowed to set X-Forwarded-For; the reverse proxy's address must be added |
 
-Settings keys: `public_url`, `roots` (JSON list of enabled top-level folders), `excludes` (newline globs), `default_expiry_hours` (default 168), `max_upload_mb` (default 20480), `admin_cidrs`, `secret` (HMAC key, generated), `setup_done`, `initial_scan_done`. Versions before multi-user kept the one admin account in `admin_user`, `admin_hash` and the `totp_*` keys. The upgrade moves that account into the `users` table as user 1 and deletes those keys.
+Settings keys: `public_url` (must be https), `public_ui` and `public_mcp` (add the web UI or MCP to the public port), `roots` (JSON list of enabled top-level folders), `excludes` (newline globs), `default_expiry_hours` (default 168), `max_upload_mb` (default 20480), `admin_cidrs`, `secret` (HMAC key, generated), `setup_done`, `initial_scan_done`. Versions before multi-user kept the one admin account in `admin_user`, `admin_hash` and the `totp_*` keys. The upgrade moves that account into the `users` table as user 1 and deletes those keys.
 
 ---
 
@@ -125,6 +128,8 @@ Migrations are idempotent `ALTER TABLE … ADD COLUMN` statements whose "duplica
 2. no segment is excluded,
 3. `filepath.EvalSymlinks(abs)` equals the expected path, which means no symlink anywhere in it.
 
+4. every segment is spelled exactly as on disk (`exactName`): the index answers for indexed paths, and directory listings answer for the rest. On a case-insensitive or Unicode-normalizing dataset, `DOCS/hr` would otherwise open `DOCS/HR` and slip past a No-access grant on `DOCS/HR`. Hidden-name patterns also match case-insensitively.
+
 Every file access goes through `resolve`. Share access additionally checks that the result stays inside the shared path.
 
 ---
@@ -143,21 +148,54 @@ Every file access goes through `resolve`. Share access additionally checks that 
 
 ## 8. Authentication and web security (`auth.go`, `api.go`)
 
-- **First-launch setup** happens in the UI. It asks for an admin username and password (10+ characters), the public URL, and which top-level folders to enable. Setup from a non-private IP requires a **setup key** printed in the container log. Setup takes a mutex so two requests can't race. Before setup, `/api/roots/available` (the folder names) only answers the LAN or holders of the setup key; after setup, only admins.
-- **Client IP:** `X-Forwarded-For` is trusted only when the direct peer is in `BURROW_TRUSTED_PROXIES`. It's walked right-to-left past trusted hops.
-- **The Secure cookie flag is decided per request.** It's set only if the request is TLS or arrived from a trusted proxy with `X-Forwarded-Proto: https`. So signing in over plain HTTP on the LAN works, while the public HTTPS address still gets Secure cookies.
+- **First-launch setup** happens in the UI. It asks for the **setup key** printed in the container log, then an admin username and password (10+ characters), the public URL, and which top-level folders to enable. Only a browser on the server itself (a loopback peer with no forwarded headers) skips the key: addresses can't prove a request is local, because a TCP proxy makes internet traffic look like the LAN. The key is made whenever setup is pending, so it's never empty. Setup takes a mutex so two requests can't race. `/api/roots/available` (the folder names) answers only with the key before setup, and only admins after.
+- **Client IP:** `X-Forwarded-For` is used only when the direct peer is in `BURROW_TRUSTED_PROXIES` (loopback by default). It's walked right-to-left past trusted hops, and a malformed entry voids the header. A private-address peer that sends forwarded headers without being trusted gets a one-time log line suggesting it be added.
+- **Cookies** are always Secure, since every connection is TLS.
 - **Session cookie:** HttpOnly, SameSite=Lax, 30 days, stored as sha256.
-- **CSRF:** every non-GET request authenticated by cookie must carry `X-Burrow: 1`. A cross-site form can't set that header.
-- **Rate limits** (in memory): sign-in 8 failures per 15 min per IP; share passwords 10 per 15 min per IP; turning off 2FA 8 per 15 min per IP; password change 8 per 15 min per user. Empty keys are deleted and the map is swept at 50k keys.
-- **Two-factor sign-in** is per user and follows RFC 6238: SHA-1, 6 digits, 30 s steps, ±1 step. Each step can be used once (`users.totp_last`, updated with a conditional UPDATE under the write lock, so two racing requests can't both use one code). There are 10 single-use recovery codes, stored hashed. Enrollment works by: start (pending secret plus a QR code of the `otpauth://` URI), then confirm with a code, then recovery codes are shown once.
+- **CSRF:** every non-GET request authenticated by cookie, plus sign-in, sign-out and setup, must carry `X-Burrow: 1`. A cross-site form can't set that header.
+- **Rate limits** are kept in memory. `limiter.take` records an attempt and checks the limit in one step, before the guess is evaluated, so parallel requests can't slip under the limit; a successful attempt is refunded. IPv6 clients are keyed by their /64.
+
+  | Guess | Limit |
+  |---|---|
+  | Sign-in | 8 per 15 min per address, 30 per hour per account |
+  | 2FA code | 10 per 15 min per account |
+  | Turning 2FA on or off, password change | 8 per 15 min per account |
+  | Share password | 10 per 15 min per address, 50 per hour per link |
+  | Unknown link id | 30 per 15 min per address |
+- **Two-factor sign-in** is per user; turning it on needs the password, so a stolen session can't lock the owner out and follows RFC 6238: SHA-1, 6 digits, 30 s steps, ±1 step. Each step can be used once (`users.totp_last`, updated with a conditional UPDATE under the write lock, so two racing requests can't both use one code). There are 10 single-use recovery codes, stored hashed. Enrollment works by: start (pending secret plus a QR code of the `otpauth://` URI), then confirm with a code, then recovery codes are shown once.
 - **Sign-in** is per user. Wrong usernames take as long as wrong passwords (a dummy bcrypt compare), and both get the same message. Changing your password needs the current one (8 tries per 15 min per user), then signs out your other sessions.
 - **API tokens** (prefix `brw_`) belong to the user who made them and act as that user, with the same folder grants. They **cannot** change the password, 2FA, tokens, settings or users; those need a browser session.
 - **Route guards** (`auth.go`): `requireUser` (session or token, the normal API), `requireAdmin` (admin by session or token, e.g. rescan), `requireSession` (account changes), `requireAdminSession` (server settings, user management). Every guard attaches the user to the request; handlers read it with `userOf(r)`.
 - **Admin access CIDRs** (`admin_cidrs`) optionally restrict the admin UI and API to listed networks. Share links (`/s/…`) always work from anywhere. Saving a list that would lock out the current client is refused.
 - **Headers:** nosniff, `X-Frame-Options: SAMEORIGIN`, a CSP of `script-src 'self'` on the UI and share pages, and `Referrer-Policy`.
 - **Serving library files:** HTML and JS are served as `text/plain`. SVG, HTML and XML get `Content-Security-Policy: sandbox`. Everything gets nosniff. `Content-Disposition` is built with `mime.FormatMediaType`, which prevents header injection through file names.
-- **CLI:** `burrow backup <file>` makes a safe online copy (`VACUUM INTO`). `burrow reset-password <username>` sets and prints a temporary password, turns off that user's 2FA, turns the account back on and signs it out everywhere.
+- **CLI:** `burrow backup <file>` makes a safe online copy (`VACUUM INTO`, mode 0600). `burrow reset-password <username> [--admin]` sets and prints a temporary password, turns off that user's 2FA, revokes their API tokens and signs them out everywhere; `--admin` also makes the account an active admin. `burrow verify-public <url> [link]` checks a deployment from the outside (section 8a).
+- **Database file** mode 0600: it holds password hashes, 2FA secrets and the key that signs share cookies.
 - **Setup is done** only when `setup_done=1` **and** at least one user exists, so a database with no accounts goes back to first-launch setup instead of locking everyone out.
+
+---
+
+## 8a. Transport and exposure (`tls.go`, `verify.go`)
+
+- **Two ports, both HTTPS only.** 47823 serves the whole app and stays on the LAN. 47824 (`publicRoutes`) serves `/s/…`, the six assets share pages load and the favicon; everything else is 404. `public_ui` and `public_mcp` add the full app or `/mcp` to it.
+- **TLS:**
+  - TLS 1.3 only, so every cipher suite is AEAD with forward secrecy.
+  - Key exchange prefers X25519MLKEM768, SecP256r1MLKEM768 and SecP384r1MLKEM1024, then X25519 and P-256. `BURROW_TLS_PQ_ONLY` drops the classical groups.
+  - HTTP/2 is negotiated through ALPN. HSTS is `max-age=31536000`, without includeSubDomains.
+- **One port, sorted by first byte** (`tlsListener`). A TLS handshake goes to the HTTPS server. Anything else goes to `plainHandler`, which redirects browsers to https (308, no body) and refuses proxied plain requests (421, since redirecting them would loop), and never serves content. Connections that say nothing are dropped after 10 s.
+- **Certificates:** cert and key files are re-read at most every 30 s when they change, and a broken renewal keeps the old certificate. Without them, a self-signed ECDSA P-256 certificate is created once in `state/tls`: 10 years, names `burrow`, `localhost` and the hostname, its own trust anchor so a proxy can pin it, key mode 0600. The SHA-256 fingerprint is logged at start.
+- **Behind Nginx Proxy Manager:** either a proxy host with forward scheme https and the self-signed certificate pinned (`proxy_ssl_verify on`, `proxy_ssl_name burrow`), or a TCP stream with Burrow holding the public certificate. The README has both. The stream keeps the proxy from ever seeing plaintext and gives post-quantum key exchange end to end, but Burrow then sees every visitor as the proxy's address, so the per-address limits become shared.
+- **Hardening on the share path:**
+  - `Cache-Control: private, no-store` on every `/s/` response, so proxy caches can't keep private files. `Referrer-Policy: no-referrer` and `X-Robots-Tag: noindex`.
+  - The QR code is served only for active links.
+  - The guessing limits in section 8 apply.
+  - Uploads are refused with 507 when free space would drop below a reserve (1% of the volume, 1–50 GB).
+- **`verify-public`** checks a deployment from the outside:
+  - certificate validity, TLS version and negotiated key exchange, and that TLS 1.0/1.1 are refused
+  - that plain HTTP never returns content, and that HSTS is on
+  - that the web UI, API, health check and MCP are not reachable
+  - seven path-traversal attempts
+  - a share page's security headers and cookie flags
 
 ---
 
@@ -174,13 +212,14 @@ Every file access goes through `resolve`. Share access additionally checks that 
 - **IDs:** 12 characters from a 56-character alphabet without look-alikes (about 70 bits). A custom slug (6–64 characters) is optional; it's easier to guess, so the UI suggests a password with it.
 - **Expiry:** 1 hour, 1 day, 7 days (the default from settings), 30 days, never, or a chosen date.
 - **Password:** bcrypt. Once entered, the browser gets a 12-hour cookie containing an HMAC of `id|pw_hash|exp`, scoped to `/s/<id>`. Changing the password invalidates it.
-- **Download limit:** counted atomically (`UPDATE … WHERE dl < max_dl`). **Range requests that don't start at byte 0 don't count.** The browser whose download was counted gets a signed **6-hour resume cookie**, so it can finish the download even after the limit is reached; other browsers get 410.
+- **Download limit** (`gateDownload`): counted atomically (`UPDATE … WHERE dl < max_dl`). On a limited link each browser counts **once per file**, for a preview (`raw`) or a download (`dl`) alike, and gets a signed 6-hour resume cookie for that file. Its later requests for the file (resuming, seeking in a video, downloading after a preview) are free, even after the limit is reached. Every other request counts, whatever its Range header, so nothing fetches a file uncounted. A zip always counts. On links without a limit only downloads from byte 0 count, for the statistics.
 - **States:** active, expired, revoked ("turned off"), used-up, missing (target gone), unavailable (the owner is gone, turned off, or can no longer share the target; a drop whose owner is no longer an admin). The UI also shows "expiring" when less than 24 h remains. Non-active links render a clear page explaining why.
 - **Note to the recipient** is shown on the page and HTML-escaped by `html/template`.
 - **QR code** as PNG: public at `/s/<id>/qr.png`, and from the admin side at `/api/shares/<id>/qr.png`, which can be downloaded at 1024 px.
 - **Zip** downloads are streamed with no compression (`zip.Store`), so they run at disk speed, use no memory, and skip hidden names and symlinks.
 - **Events** are logged with IP and user agent: view, download, zip, upload, password-fail.
 - **Public pages** are server-rendered (`web/share.html`). They work without JavaScript; `share.js` only adds drag-and-drop and per-file upload progress. It sends one request per file, so one failed file doesn't fail the rest. Pages send `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex` and a CSP with `script-src 'self'` and `form-action 'self'`.
+- **Opening files** goes through `openNoFollow`: `openat2` with `RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH` relative to the library (or drop) folder, so a symlink swapped in after `resolve` checked the path isn't followed. Where the kernel or seccomp lacks openat2, it falls back to `O_NOFOLLOW`.
 - **Serving files** uses `http.ServeContent` on the open file, so Range requests work and whole files go out through `sendfile` (no copy through Go's memory).
 
 ### Uploads (drops, shared folders)
@@ -326,19 +365,34 @@ The rules, as numbered in the CSS comments:
 ## 15. Security review, tests and performance
 
 ### How the protections are verified
-- **Integration tests through real HTTP** (`burrow_test.go`, `users_test.go`, 22 tests). They cover path escapes, symlinks, hidden names and disabled libraries; CSRF; 2FA replay and recovery codes; inert serving of HTML/SVG and header injection through file names; download limits and range resumes; every grant rule on every surface in section 12; link ownership and owner changes; admin-only endpoints; token scope; the last-admin guard; the upgrade; lazy upload folders and hidden partial uploads; thumbnail revalidation; and MCP acting as the token's user.
+- **Integration tests through real HTTP** (`burrow_test.go`, `users_test.go`, `security_test.go`, 45 tests). They cover path escapes, symlinks, hidden names and disabled libraries; CSRF; 2FA replay and recovery codes; inert serving of HTML/SVG and header injection through file names; download limits and range resumes; every grant rule on every surface in section 12; link ownership and owner changes; admin-only endpoints; token scope; the last-admin guard; the upgrade; lazy upload folders and hidden partial uploads; thumbnail revalidation; and MCP acting as the token's user.
 - **Property test:** `TestScopeMatchesCan` (SQL filter against the Go check, 400 random grant sets).
-- **Mutation checks:** three protections were removed one at a time to confirm the tests fail: the zip filter, the owner check on link sub-paths, and the SQL filter in search. All three are caught.
+- **Mutation checks:** protections were removed one at a time to confirm a test fails each time. All of these are caught:
+  - the zip filter, the owner check on link sub-paths and the SQL filter in search
+  - the public-port asset allowlist and the link-id guessing limit
+  - download counting, TLS 1.3-only, and `openat2`
+  - the atomic rate limiter, the cross-site guard on sign-in, the exact-name check, and the admin-change lock
+- **Case-insensitive filesystem:** `TestExactNamesAndHiddenNameCase` mounts one (a casefold tmpfs, or ciopfs over FUSE) where it can. Without the exact-name check, a user with No access on `DOCS/HR` read `DOCS/hr/pay.txt`; with it, every spelling is refused.
+- **Independent audits:** two read-only reviews, one of the public surface and one of the signed-in API and UI. Every finding was checked against the code, and the real ones were fixed with a test each. They included parallel guessing past the limits, case-spelling past grants, Range requests past download limits, CSRF on sign-in, a race on the last admin, and MCP inputs.
+- **Smoke test with a real reverse proxy:** nginx 1.24 (OpenSSL 3.0, like a typical Nginx Proxy Manager) in front of the public port, set up as a proxy host with the upstream certificate pinned, and separately as a TCP stream.
+  - Every flow worked over HTTPS on both hops: the password gate, downloads, folder browsing and a drop upload.
+  - The web UI, API, MCP and health check answered 404 through the proxy, traversal attempts 404, and port 80 redirected.
+  - A packet capture of both hops during those flows held no file contents, password, link id, path, cookie or HTTP verb. A control capture of a plain-HTTP request did show its path, so the search works.
+  - Chromium negotiated TLS 1.3 with X25519MLKEM768 directly with Burrow and through the stream, and X25519 through the proxy host (OpenSSL 3.0).
+  - `verify-public` passed everything, with a single warning: the proxy host's key exchange isn't post-quantum.
 - **Browser run:** the real binary on a sample library, driven with Playwright as an admin and as a restricted user. 21 checks covered setup, user creation, carve-outs, view-only files, sharing, search, settings, a link stopping when its owner loses access, and the phone layout. 7 more covered public drop uploads, admin uploads into a shared folder, folders appearing only on first upload, and no partial files left. No page or console errors.
 
 ### Known limits and remaining risks
-1. **Admin access list** (`admin_cidrs`) blocks the whole API from outside the list, tokens included. The phone app needs device tokens to pass (section 16).
-2. **Rate limits** are in memory and per IP, and reset on restart. Sign-in isn't limited per account across many IPs, on purpose: a per-account lock would let anyone lock a user out.
-3. **Custom link names** are guessable. The UI suggests a password with them.
-4. **Drop folder inside the library** is visible to anyone with access to its parent (section 12).
-5. **Very broad searches** that match most of the index are slower (see below), because results are ranked and the total is counted up to 10,000. Specific searches stay around 15 ms.
-6. **Thumbnail memory:** up to 3 decodes at once, each capped at 60 MP (about 240 MB), so roughly 720 MB at the worst moment.
-7. **Token "last used"** can lag by up to a minute (written at most once a minute on purpose).
+1. **Admin access list** (`admin_cidrs`) blocks the whole LAN-port API from outside the list, tokens included. The phone app's device API will live on the public port (section 16).
+2. **Rate limits** are in memory and reset on restart. The per-account sign-in limit (30 per hour) means someone who knows a username can keep that account from signing in for an hour; that is the price of stopping guesses spread over many addresses.
+3. **Custom link names** are guessable. The UI suggests a password with them, and guessing is throttled.
+4. **TCP stream mode** hides visitors' addresses from Burrow, so guessing limits are shared by everyone behind the proxy.
+5. **Typing `http://` by hand** sends that first request's URL in plain text before the redirect (nothing is served). HSTS prevents it on later visits.
+6. **Grants follow paths.** Renaming a carved-out folder moves it out from under its No-access grant.
+7. **Drop folder inside the library** is visible to anyone with access to its parent (section 12).
+8. **Very broad searches** that match most of the index are slower (see below), because results are ranked and the total is counted up to 10,000. Specific searches stay around 15 ms.
+9. **Thumbnail memory:** up to 3 decodes at once, each capped at 60 MP (about 240 MB), so roughly 720 MB at the worst moment.
+10. **Token "last used"** can lag by up to a minute (written at most once a minute on purpose).
 
 ### Performance
 Measured on a library of 250,000 files in 3,425 folders:
@@ -379,7 +433,7 @@ The per-user filter adds nothing measurable. The broad-query cost was already th
 4. **Uploads.** Resumable chunked uploads to a hidden partial file (the same `.burrow-part-` pattern), renamed into place when complete. Name conflicts: keep both, overwrite or skip. Schema: `uploads(id, user_id, dir, name, size, off, sha256, mtime, conflict, created)`.
 5. **Deletes** go to a hidden trash folder and are kept 30 days.
 6. **Sync API:** a folder listing, a change feed with a cursor (`changes.id` already increases monotonically), and cached SHA-256 hashes, `file_hashes(path, size, mtime, sha256)`.
-7. **Admin access list:** let **device** tokens through from anywhere (not API tokens), or the app won't work away from home.
+7. **Where the app connects:** the device API goes on the public port, next to share links, gated by device tokens, so the app works away from home while the web UI stays private.
 
 These tables and columns are not in the schema yet; it only holds what is built.
 
