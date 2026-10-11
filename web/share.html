@@ -26,6 +26,9 @@
 {{else if eq .State "used-up"}}
   <h1>This link reached its download limit</h1>
   <p>It allowed {{.S.MaxDL}} download{{if ne .S.MaxDL 1}}s{{end}}. Ask the sender for a new link.</p>
+{{else if eq .State "throttled"}}
+  <h1>Too many tries</h1>
+  <p>Wait 15 minutes, then open the link again.</p>
 {{else if eq .State "locked"}}
   <h1>Too many wrong passwords</h1>
   <p>Wait 15 minutes, then try again.</p>

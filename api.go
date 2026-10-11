@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,7 +29,9 @@ type App struct {
 	thumbSem  chan struct{}
 	setupKey  string
 	setupMu   sync.Mutex
-	shareMu   sync.Mutex // serializes share creation (upload folder names)
+	shareMu   sync.Mutex  // serializes share creation (upload folder names)
+	publicUI  atomic.Bool // serve the web UI and its API on the public port too
+	publicMCP atomic.Bool // serve /mcp on the public port too
 }
 
 func newApp(cfg Config, st *Store) (*App, error) {
@@ -47,9 +51,11 @@ func newApp(cfg Config, st *Store) (*App, error) {
 		a.proxyNets = append(a.proxyNets, n)
 	}
 	a.idx = newIndexer(cfg, st)
+	a.publicUI.Store(st.get("public_ui") == "1")
+	a.publicMCP.Store(st.get("public_mcp") == "1")
 	if !a.setupDone() {
 		a.setupKey = randSlug(8)
-		log.Printf("first launch: open the web UI to finish setup. From outside your LAN, setup asks for this key: %s", a.setupKey)
+		log.Printf("first launch: open the web UI to finish setup. Setup key: %s", a.setupKey)
 	}
 	return a, nil
 }
@@ -182,10 +188,7 @@ func (a *App) routes() http.Handler {
 // secure adds baseline headers and an optional admin IP allow-list.
 func (a *App) secure(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("X-Frame-Options", "SAMEORIGIN")
-		h.Set("Referrer-Policy", "same-origin")
+		baseHeaders(w, r)
 		p := r.URL.Path
 		public := strings.HasPrefix(p, "/s/") || p == "/healthz" || strings.HasPrefix(p, "/assets/") || p == "/favicon.svg"
 		if !public && !a.adminAllowed(r) {
@@ -196,28 +199,98 @@ func (a *App) secure(next http.Handler) http.Handler {
 	})
 }
 
+func baseHeaders(w http.ResponseWriter, r *http.Request) {
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "SAMEORIGIN")
+	h.Set("Referrer-Policy", "same-origin")
+	h.Set("Cross-Origin-Opener-Policy", "same-origin")
+	h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+	if r.TLS != nil {
+		// no includeSubDomains: other sites under the same domain aren't Burrow's to decide
+		h.Set("Strict-Transport-Security", "max-age=31536000")
+	}
+}
+
+// publicRoutes is what the public port serves: share links and the few assets
+// their pages use. The web UI with its API, and MCP, are only added when an admin
+// turns them on (Settings > Public port); everything else is 404, so the admin
+// side isn't reachable from the internet at all by default.
+func (a *App) publicRoutes() http.Handler {
+	full := a.routes()
+	pub := http.NewServeMux()
+	pub.HandleFunc("/s/{id}", a.handleShare)
+	pub.HandleFunc("/s/{id}/{action}", a.handleShare)
+	pub.HandleFunc("GET /assets/{file}", func(w http.ResponseWriter, r *http.Request) {
+		if !publicAssets[r.PathValue("file")] {
+			http.NotFound(w, r)
+			return
+		}
+		a.handleAsset(w, r)
+	})
+	pub.HandleFunc("GET /favicon.svg", func(w http.ResponseWriter, r *http.Request) {
+		r.SetPathValue("file", "favicon.svg")
+		a.handleAsset(w, r)
+	})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if a.publicUI.Load() || (p == "/mcp" && a.publicMCP.Load()) {
+			full.ServeHTTP(w, r)
+			return
+		}
+		baseHeaders(w, r)
+		pub.ServeHTTP(w, r)
+	})
+}
+
+// publicAssets are the files share pages load; the admin UI's code isn't among them.
+var publicAssets = map[string]bool{
+	"base.css": true, "share.css": true, "share.js": true, "favicon.svg": true,
+	"atkinson-hyperlegible-latin-400-normal.woff2": true, "atkinson-hyperlegible-latin-700-normal.woff2": true,
+}
+
 func (a *App) adminAllowed(r *http.Request) bool {
 	list := strings.TrimSpace(a.st.get("admin_cidrs"))
-	if list == "" {
-		return true
+	return list == "" || cidrsAllow(list, net.ParseIP(a.clientIP(r)))
+}
+
+func splitCIDRs(list string) []string {
+	return strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == '\n' || r == ' ' || r == '\t' })
+}
+
+func parseCIDR(c string) (*net.IPNet, error) {
+	if !strings.Contains(c, "/") {
+		if strings.Contains(c, ":") {
+			c += "/128"
+		} else {
+			c += "/32"
+		}
 	}
-	ip := net.ParseIP(a.clientIP(r))
+	_, n, err := net.ParseCIDR(c)
+	return n, err
+}
+
+// cidrsAllow reports whether ip is in the comma-separated list of IPs and ranges.
+func cidrsAllow(list string, ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	for _, c := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == '\n' || r == ' ' }) {
-		if !strings.Contains(c, "/") {
-			if strings.Contains(c, ":") {
-				c += "/128"
-			} else {
-				c += "/32"
-			}
-		}
-		if _, n, err := net.ParseCIDR(c); err == nil && n.Contains(ip) {
+	for _, c := range splitCIDRs(list) {
+		if n, err := parseCIDR(c); err == nil && n.Contains(ip) {
 			return true
 		}
 	}
 	return false
+}
+
+// badCIDR returns the first entry in the list that isn't an IP or range.
+func badCIDR(list string) string {
+	for _, c := range splitCIDRs(list) {
+		if _, err := parseCIDR(c); err != nil {
+			return c
+		}
+	}
+	return ""
 }
 
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -264,8 +337,7 @@ func (a *App) apiState(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{"setup_done": done, "signed_in": u != nil, "version": version}
 	if !done {
-		out["needs_key"] = !a.isPrivate(a.clientIP(r))
-		out["data_dir"] = a.cfg.DataDir
+		out["needs_key"] = a.needsSetupKey(r)
 	}
 	if u != nil {
 		out["user"] = u.Name
@@ -273,18 +345,6 @@ func (a *App) apiState(w http.ResponseWriter, r *http.Request) {
 		out["public_url"] = a.st.get("public_url")
 	}
 	writeJSON(w, out)
-}
-
-func (a *App) isPrivate(ip string) bool {
-	p := net.ParseIP(ip)
-	if p == nil {
-		return false
-	}
-	if p.IsLoopback() || p.IsPrivate() {
-		return true
-	}
-	_, cgnat, _ := net.ParseCIDR("100.64.0.0/10") // Tailscale
-	return cgnat.Contains(p)
 }
 
 type rootInfo struct {
@@ -326,7 +386,7 @@ func (a *App) apiRootsAvailable(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !a.setupDone() && !a.isPrivate(a.clientIP(r)) && r.URL.Query().Get("key") != a.setupKey {
+	if !a.setupDone() && a.needsSetupKey(r) && !hmacEqual(r.URL.Query().Get("key"), a.setupKey) {
 		httpErr(w, 403, "setup key required")
 		return
 	}
@@ -351,8 +411,13 @@ func (a *App) apiSetup(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad request")
 		return
 	}
-	if !a.isPrivate(a.clientIP(r)) && in.Key != a.setupKey {
+	if a.needsSetupKey(r) && !hmacEqual(in.Key, a.setupKey) {
 		httpErr(w, 403, "setup key required: it is printed in the container log")
+		return
+	}
+	pubURL, err := normalizeURL(in.PublicURL)
+	if err != nil {
+		httpErr(w, 400, err.Error())
 		return
 	}
 	u, err := a.createUser(in.User, in.Password, true)
@@ -360,7 +425,7 @@ func (a *App) apiSetup(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
-	a.st.set("public_url", normalizeURL(in.PublicURL))
+	a.st.set("public_url", pubURL)
 	a.saveRoots(in.Roots)
 	if a.st.get("default_expiry_hours") == "" {
 		a.st.set("default_expiry_hours", "168")
@@ -386,12 +451,35 @@ func (a *App) saveRoots(roots []string) {
 	a.idx.reloadSettings()
 }
 
-func normalizeURL(u string) string {
-	u = strings.TrimRight(strings.TrimSpace(u), "/")
-	if u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+// normalizeURL checks the public address links are built from. It must be https:
+// links are sent to other people, so they never point at a plain-text address.
+func normalizeURL(raw string) (string, error) {
+	u := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if u == "" {
+		return "", nil
+	}
+	if !strings.Contains(u, "://") {
 		u = "https://" + u
 	}
-	return u
+	p, err := url.Parse(u)
+	if err != nil || p.Host == "" || p.User != nil || p.RawQuery != "" || p.Fragment != "" {
+		return "", errors.New("public address: use the form https://share.example.com")
+	}
+	if p.Scheme != "https" {
+		return "", errors.New("public address must start with https://")
+	}
+	return u, nil
+}
+
+// needsSetupKey: first-launch setup needs the key printed in the container log,
+// unless the browser runs on the server itself. Addresses and forwarded headers
+// can't prove a request is local (a TCP proxy makes internet traffic look like
+// the LAN), so nothing else skips the key.
+func (a *App) needsSetupKey(r *http.Request) bool {
+	peer, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := net.ParseIP(peer)
+	proxied := r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != "" || r.Header.Get("Forwarded") != ""
+	return ip == nil || !ip.IsLoopback() || proxied
 }
 
 func (a *App) apiLogin(w http.ResponseWriter, r *http.Request) {
@@ -502,7 +590,7 @@ func (a *App) apiRaw(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "not found")
 		return
 	}
-	serveFile(w, r, abs, info, r.URL.Query().Get("dl") == "1")
+	a.serveFile(w, r, abs, info, r.URL.Query().Get("dl") == "1")
 }
 
 func (a *App) apiThumb(w http.ResponseWriter, r *http.Request) {
@@ -619,6 +707,9 @@ type Settings struct {
 	Roots              []rootInfo `json:"roots"`
 	Excludes           string     `json:"excludes"`
 	AdminCIDRs         string     `json:"admin_cidrs"`
+	PublicUI           bool       `json:"public_ui"`
+	PublicMCP          bool       `json:"public_mcp"`
+	PublicAddr         string     `json:"public_addr"`
 	DataDir            string     `json:"data_dir"`
 	DropDir            string     `json:"drop_dir"`
 	ScanHours          float64    `json:"scan_hours"`
@@ -639,6 +730,7 @@ func (a *App) currentSettings(u *User) Settings {
 	if u.Admin {
 		out.Roots, out.Excludes, out.AdminCIDRs = a.availableRoots(), ex, a.st.get("admin_cidrs")
 		out.DataDir, out.DropDir, out.ScanHours = a.cfg.DataDir, a.cfg.DropDir, a.cfg.ScanInterval.Hours()
+		out.PublicUI, out.PublicMCP, out.PublicAddr = a.publicUI.Load(), a.publicMCP.Load(), a.cfg.PublicAddr
 	}
 	return out
 }
@@ -650,6 +742,8 @@ func (a *App) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 func (a *App) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		PublicURL          *string   `json:"public_url"`
+		PublicUI           *bool     `json:"public_ui"`
+		PublicMCP          *bool     `json:"public_mcp"`
 		Roots              *[]string `json:"roots"`
 		Excludes           *string   `json:"excludes"`
 		DefaultExpiryHours *float64  `json:"default_expiry_hours"`
@@ -661,9 +755,37 @@ func (a *App) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rescan := false
+	// check everything that can be refused before changing anything
+	var pubURL string
 	if in.PublicURL != nil {
-		a.st.set("public_url", normalizeURL(*in.PublicURL))
+		var err error
+		if pubURL, err = normalizeURL(*in.PublicURL); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
 	}
+	if in.AdminCIDRs != nil {
+		v := strings.TrimSpace(*in.AdminCIDRs)
+		if bad := badCIDR(v); bad != "" {
+			httpErr(w, 400, "not an IP address or range: "+bad)
+			return
+		}
+		if v != "" && !cidrsAllow(v, net.ParseIP(a.clientIP(r))) {
+			httpErr(w, 400, "that list would lock out the network you're on now; include "+a.clientIP(r))
+			return
+		}
+	}
+	if in.PublicURL != nil {
+		a.st.set("public_url", pubURL)
+	}
+	setFlag := func(key string, v *bool, f *atomic.Bool) {
+		if v != nil {
+			a.st.set(key, map[bool]string{true: "1", false: ""}[*v])
+			f.Store(*v)
+		}
+	}
+	setFlag("public_ui", in.PublicUI, &a.publicUI)
+	setFlag("public_mcp", in.PublicMCP, &a.publicMCP)
 	if in.Excludes != nil {
 		a.st.set("excludes", strings.TrimSpace(*in.Excludes))
 		a.idx.reloadSettings()
@@ -680,13 +802,7 @@ func (a *App) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 		a.st.set("max_upload_mb", strconv.FormatInt(max64(*in.MaxUploadMB, 1), 10))
 	}
 	if in.AdminCIDRs != nil {
-		v := strings.TrimSpace(*in.AdminCIDRs)
-		a.st.set("admin_cidrs", v)
-		if v != "" && !a.adminAllowed(r) {
-			a.st.set("admin_cidrs", "")
-			httpErr(w, 400, "that list would lock out the network you're on now; include "+a.clientIP(r))
-			return
-		}
+		a.st.set("admin_cidrs", strings.TrimSpace(*in.AdminCIDRs))
 	}
 	if rescan {
 		a.idx.Rescan()

@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type collSource struct {
@@ -271,32 +273,15 @@ func (a *App) handleCollection(w http.ResponseWriter, r *http.Request, s Share, 
 		return
 	}
 	switch action {
-	case "dl":
+	case "dl", "raw":
 		if info.IsDir() {
 			httpErr(w, 400, "use zip for folders")
 			return
 		}
-		if countsAsDownload(r) {
-			if !a.countDownload(s) {
-				a.renderShare(w, http.StatusGone, sharePage{S: s, State: "used-up", Title: s.Label})
-				return
-			}
-			a.logShare(r, s.ID, "download", sub)
-			if s.MaxDL > 0 {
-				a.grantResume(w, r, s, sub)
-			}
-		} else if s.State != "active" && !a.resumeOK(r, s, sub) {
-			a.renderShare(w, http.StatusGone, sharePage{S: s, State: s.State, Title: s.Label})
+		if !a.gateDownload(w, r, s, sub, action == "dl") {
 			return
 		}
-		serveFile(w, r, abs, info, true)
-		return
-	case "raw":
-		if !info.IsDir() {
-			serveFile(w, r, abs, info, false)
-			return
-		}
-		httpErr(w, 400, "folder")
+		a.serveFile(w, r, abs, info, action == "dl")
 		return
 	case "thumb":
 		a.serveThumb(w, r, abs, info)
@@ -453,7 +438,7 @@ func (a *App) apiOwnerUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := a.receiveUploads(w, r, s, a.uploadDir(s), false)
 	if err != nil {
-		httpErr(w, 400, err.Error())
+		httpErr(w, uploadErrCode(err), err.Error())
 		return
 	}
 	writeJSON(w, map[string]any{"saved": n, "view": a.collectionView(s)})
@@ -491,6 +476,9 @@ func (a *App) receiveUploads(w http.ResponseWriter, r *http.Request, s Share, di
 	if err != nil {
 		return 0, errors.New("expected a multipart upload")
 	}
+	if err := a.checkSpace(r.ContentLength); err != nil {
+		return 0, err
+	}
 	if err := os.MkdirAll(dir, 0o775); err != nil {
 		return 0, errors.New("upload folder unavailable")
 	}
@@ -506,6 +494,10 @@ func (a *App) receiveUploads(w http.ResponseWriter, r *http.Request, s Share, di
 		if part.FileName() == "" {
 			part.Close()
 			continue
+		}
+		if err := a.checkSpace(0); err != nil {
+			part.Close()
+			return n, err
 		}
 		name := safeFileName(part.FileName())
 		saved, written, err := saveUpload(dir, name, part)
@@ -555,6 +547,46 @@ func saveUpload(dir, name string, src io.Reader) (string, int64, error) {
 		return "", 0, errors.New("could not save " + name)
 	}
 	return filepath.Base(dst.Name()), written, nil
+}
+
+var errNoSpace = errors.New("the server is almost out of space; try again later")
+
+func uploadErrCode(err error) int {
+	if errors.Is(err, errNoSpace) {
+		return http.StatusInsufficientStorage
+	}
+	return http.StatusBadRequest
+}
+
+// freeSpace reports bytes available to Burrow and the volume size where uploads land.
+var freeSpace = func(dir string) (avail, total uint64, err error) {
+	var st unix.Statfs_t
+	for p := dir; ; p = filepath.Dir(p) {
+		if err = unix.Statfs(p, &st); err == nil {
+			return st.Bavail * uint64(st.Bsize), st.Blocks * uint64(st.Bsize), nil
+		}
+		if filepath.Dir(p) == p {
+			return 0, 0, err
+		}
+	}
+}
+
+// checkSpace refuses an upload that would leave less than a reserve free (1% of the
+// volume, at least 1 GB and at most 50 GB), so a leaked drop link can't fill the disk.
+func (a *App) checkSpace(incoming int64) error {
+	avail, total, err := freeSpace(a.cfg.DropDir)
+	if err != nil {
+		return nil // can't tell; the size limit per file still applies
+	}
+	reserve := min(max(total/100, 1<<30), 50<<30)
+	need := reserve
+	if incoming > 0 {
+		need += uint64(incoming)
+	}
+	if avail < need {
+		return errNoSpace
+	}
+	return nil
 }
 
 // cleanPartials removes upload leftovers older than a day (from a crash mid-upload).

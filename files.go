@@ -7,7 +7,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var errNotAllowed = errors.New("path not available")
@@ -36,6 +39,40 @@ func (a *App) resolve(rel string) (string, string, error) {
 		return "", "", errNotAllowed
 	}
 	return abs, rel, nil
+}
+
+// openNoFollow opens a file that resolve (or an upload folder lookup) already
+// approved, so that nothing can be swapped in between the check and the open: no
+// component may be a symlink and the path can't leave the library or drop folder.
+// It uses openat2 (Linux 5.6+); where that is unavailable it at least refuses a
+// symlink as the last component.
+func (a *App) openNoFollow(abs string) (*os.File, error) {
+	under := func(dir string) bool { return dir != "" && strings.HasPrefix(abs, dir+string(os.PathSeparator)) }
+	base := a.cfg.DataDir
+	// the drop folder may sit inside the library; the deeper base is the tighter one
+	if under(a.cfg.DropDir) && (!under(base) || len(a.cfg.DropDir) > len(base)) {
+		base = a.cfg.DropDir
+	}
+	rel, err := filepath.Rel(base, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return nil, errNotAllowed
+	}
+	dir, err := unix.Open(base, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(dir)
+	fd, err := unix.Openat2(dir, rel, &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS,
+	})
+	if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EPERM) {
+		return os.OpenFile(abs, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), abs), nil
 }
 
 type Entry struct {

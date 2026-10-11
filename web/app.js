@@ -181,7 +181,7 @@ async function setupScreen(st, key = '') {
   const roots = await fetch('/api/roots/available?key=' + encodeURIComponent(key)).then(r => r.ok ? r.json() : []).catch(() => []);
   const err = h('p', { class: 'err', role: 'alert' });
   const checks = h('div', { class: 'checks' }, roots.length ? roots.map(r => h('label', {}, h('input', { type: 'checkbox', value: r.name, checked: true }), r.name))
-    : h('p', { class: 'muted' }, `No folders found in ${st.data_dir}. Check the container's /data mount.`));
+    : h('p', { class: 'muted' }, 'No folders found. Check the container\u2019s /data mount.'));
   const f = h('form', {},
     h('h1', {}, h('img', { src: '/favicon.svg', alt: '' }), 'Set up Burrow'),
     h('label', { class: 'field' }, h('span', {}, 'Admin username'), h('input', { name: 'user', autocomplete: 'username', required: true, value: 'admin' })),
@@ -532,7 +532,7 @@ function newLinkForm(e, done) {
       h('div', { class: 'field' }, h('span', {}, 'Expires'), exp.el),
       h('div', { class: 'grid2' },
         h('label', { class: 'field' }, h('span', {}, 'Password'), h('input', { name: 'pw', type: 'text', autocomplete: 'off', placeholder: 'None' })),
-        h('label', { class: 'field' }, h('span', {}, 'Download limit', info('Counts presses of Download or Download all. Previews in the browser don’t count.')), h('input', { name: 'max', type: 'number', min: 0, placeholder: 'None' }))),
+        h('label', { class: 'field' }, h('span', {}, 'Download limit', info('Each browser counts once per file, whether it previews or downloads it. Download all counts once.')), h('input', { name: 'max', type: 'number', min: 0, placeholder: 'None' }))),
       h('label', { class: 'field' }, h('span', {}, 'Note to recipient'), h('textarea', { name: 'note', rows: 2 })),
       h('label', { class: 'field' }, h('span', {}, 'Custom link name', info('Optional. Replaces the random part of the link, e.g. /s/taxes-for-mom. Random links are much harder to guess.')), h('input', { name: 'slug', class: 'mono', autocomplete: 'off', placeholder: 'Random' })),
       err,
@@ -981,6 +981,11 @@ async function viewSettings(s, seq) {
     admin ? [section('Public address', 'Share links and QR codes are built from this address.',
       h('input', { name: 'url', value: st.public_url, placeholder: location.origin, inputmode: 'url' }),
       f => api('/api/settings', { method: 'PUT', body: { public_url: f.url.value } })),
+    section('Public port', `Port ${st.public_addr || '(off)'} is the one to forward from your reverse proxy. It always serves share links, and nothing else unless you turn it on here.`,
+      h('div', { class: 'checks' },
+        h('label', {}, h('input', { type: 'checkbox', name: 'pui', checked: st.public_ui }), 'Also serve the web UI and its API'),
+        h('label', {}, h('input', { type: 'checkbox', name: 'pmcp', checked: st.public_mcp }), 'Also serve MCP (still needs an API token)')),
+      f => api('/api/settings', { method: 'PUT', body: { public_ui: f.pui.checked, public_mcp: f.pmcp.checked } })),
     section('Libraries', `Top-level folders inside ${st.data_dir}. Only checked folders can be searched, browsed or shared.`,
       h('div', { class: 'checks' }, st.roots.map(r => h('label', {}, h('input', { type: 'checkbox', name: 'root', value: r.name, checked: r.enabled }), r.name))),
       f => api('/api/settings', { method: 'PUT', body: { roots: [...f.querySelectorAll('input[name=root]:checked')].map(i => i.value) } })),

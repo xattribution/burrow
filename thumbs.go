@@ -49,7 +49,7 @@ func (a *App) serveThumb(w http.ResponseWriter, r *http.Request, abs string, inf
 	if serveCachedThumb(w, r, cache) { // another request made it while this one waited
 		return
 	}
-	data, err := makeThumb(abs)
+	data, err := a.makeThumb(abs)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -109,8 +109,8 @@ func (a *App) pruneThumbs(maxAge time.Duration) {
 	})
 }
 
-func makeThumb(abs string) ([]byte, error) {
-	f, err := os.Open(abs)
+func (a *App) makeThumb(abs string) ([]byte, error) {
+	f, err := a.openNoFollow(abs)
 	if err != nil {
 		return nil, err
 	}
