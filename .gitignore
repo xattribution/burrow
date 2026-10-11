@@ -3,3 +3,5 @@
 *.db
 *.db-*
 /burrow
+jar*
+*.cookies
