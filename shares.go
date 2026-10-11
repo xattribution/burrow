@@ -529,17 +529,17 @@ func (a *App) handleShare(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 	// Guessing link ids (custom names are shorter than random ones) is throttled.
-	enumKey := enumKeyPrefix + a.clientIP(r)
-	if !a.limiter.allow(enumKey, enumLimit, guessWindow) {
+	enumKey := enumKeyPrefix + limitIP(a.clientIP(r))
+	if !a.limiter.take(enumKey, enumLimit, guessWindow) {
 		a.renderShare(w, http.StatusTooManyRequests, sharePage{State: "throttled", Title: "Too many tries"})
 		return
 	}
 	s, err := a.getShare(id)
 	if err != nil {
-		a.limiter.fail(enumKey)
 		a.renderShare(w, http.StatusNotFound, sharePage{State: "missing", Title: "Link not found"})
 		return
 	}
+	a.limiter.refund(enumKey) // only misses count
 	owner := a.shareOwner(s)
 	s.State = a.shareStateFor(&s, owner)
 	// A browser that was already counted for a file may keep fetching it after the
@@ -562,19 +562,24 @@ func (a *App) handleShare(w http.ResponseWriter, r *http.Request) {
 
 	// password gate
 	if action == "auth" && r.Method == http.MethodPost {
-		key, linkKey := "share:"+a.clientIP(r), "sharepw:"+s.ID
-		if !a.limiter.allow(key, sharePWLimit, guessWindow) || !a.limiter.allow(linkKey, linkPWLimit, linkPWWindow) {
+		key, linkKey := "share:"+limitIP(a.clientIP(r)), "sharepw:"+s.ID
+		if !a.limiter.take(key, sharePWLimit, guessWindow) {
+			a.renderShare(w, http.StatusTooManyRequests, sharePage{S: s, Title: s.Label, State: "locked"})
+			return
+		}
+		if !a.limiter.take(linkKey, linkPWLimit, linkPWWindow) {
+			a.limiter.refund(key)
 			a.renderShare(w, http.StatusTooManyRequests, sharePage{S: s, Title: s.Label, State: "locked"})
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 		if bcrypt.CompareHashAndPassword([]byte(s.pwHash), []byte(r.FormValue("password"))) != nil {
-			a.limiter.fail(key)
-			a.limiter.fail(linkKey)
 			a.logShare(r, s.ID, "password-fail", "")
 			a.renderShare(w, http.StatusUnauthorized, sharePage{S: s, Title: s.Label, NeedPW: true, PWError: true, State: "active"})
 			return
 		}
+		a.limiter.refund(key)
+		a.limiter.refund(linkKey)
 		exp := strconv.FormatInt(now()+12*3600, 10)
 		http.SetCookie(w, &http.Cookie{Name: a.pwCookieName(s.ID), Value: exp + "." + a.sign(s.ID+"|"+s.pwHash+"|"+exp), Path: "/s/" + s.ID, HttpOnly: true, Secure: a.isHTTPS(r), SameSite: http.SameSiteLaxMode, MaxAge: 12 * 3600})
 		http.Redirect(w, r, "/s/"+s.ID, http.StatusSeeOther)

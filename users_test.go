@@ -549,7 +549,7 @@ func TestMigrateSingleAdmin(t *testing.T) {
 		t.Fatalf("old link: %d", c)
 	}
 	b, _ := json.Marshal(map[string]string{"user": "alex", "password": "oldpassword1"})
-	r, _ = http.Post(srv.URL+"/api/login", "application/json", bytes.NewReader(b))
+	r, _ = postJSON(srv.URL+"/api/login", b)
 	r.Body.Close()
 	if r.StatusCode != 200 {
 		t.Fatalf("old password: %d", r.StatusCode)

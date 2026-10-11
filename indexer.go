@@ -110,12 +110,16 @@ func (ix *Indexer) reloadSettings() {
 }
 
 func (ix *Indexer) excluded(name string) bool {
+	// case-insensitive, so a hidden name can't be reached by changing its case on
+	// a case-insensitive dataset
+	name = strings.ToLower(name)
 	if strings.HasPrefix(name, partPrefix) { // upload in progress
 		return true
 	}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	for _, p := range ix.excludes {
+		p = strings.ToLower(p)
 		if ok, _ := path.Match(p, name); ok || p == name {
 			return true
 		}

@@ -32,10 +32,15 @@ type App struct {
 	shareMu   sync.Mutex  // serializes share creation (upload folder names)
 	publicUI  atomic.Bool // serve the web UI and its API on the public port too
 	publicMCP atomic.Bool // serve /mcp on the public port too
+	adminMu   sync.Mutex  // serializes changes that could leave no active admin
+	searchSem chan struct{}
+	keyMu     sync.Mutex
+	noteMu    sync.Mutex
+	noted     map[string]bool
 }
 
 func newApp(cfg Config, st *Store) (*App, error) {
-	a := &App{cfg: cfg, st: st, limiter: newLimiter(), thumbSem: make(chan struct{}, 3)}
+	a := &App{cfg: cfg, st: st, limiter: newLimiter(), thumbSem: make(chan struct{}, 3), searchSem: make(chan struct{}, 4)}
 	for _, c := range cfg.TrustedProxies {
 		if !strings.Contains(c, "/") {
 			if strings.Contains(c, ":") {
@@ -54,10 +59,34 @@ func newApp(cfg Config, st *Store) (*App, error) {
 	a.publicUI.Store(st.get("public_ui") == "1")
 	a.publicMCP.Store(st.get("public_mcp") == "1")
 	if !a.setupDone() {
-		a.setupKey = randSlug(8)
-		log.Printf("first launch: open the web UI to finish setup. Setup key: %s", a.setupKey)
+		a.currentSetupKey()
 	}
 	return a, nil
+}
+
+// currentSetupKey returns the first-launch setup key, making (and logging) one if
+// there is none yet, so setup is never possible with an empty key.
+func (a *App) currentSetupKey() string {
+	a.keyMu.Lock()
+	defer a.keyMu.Unlock()
+	if a.setupKey == "" {
+		a.setupKey = randSlug(12)
+		log.Printf("first launch: open the web UI to finish setup. Setup key: %s", a.setupKey)
+	}
+	return a.setupKey
+}
+
+// sameSite guards the routes that work without a session (sign-in, sign-out,
+// setup) the way requireUser guards the rest: a page on another site can't send
+// the X-Burrow header, so it can't sign a visitor in or out, or run setup.
+func sameSite(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Burrow") != "1" {
+			httpErr(w, http.StatusForbidden, "missing X-Burrow header")
+			return
+		}
+		next(w, r)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -99,12 +128,12 @@ func (a *App) routes() http.Handler {
 
 	// session / setup
 	mux.HandleFunc("GET /api/state", a.apiState)
-	mux.HandleFunc("POST /api/setup", a.apiSetup)
-	mux.HandleFunc("POST /api/login", a.apiLogin)
-	mux.HandleFunc("POST /api/logout", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/setup", sameSite(a.apiSetup))
+	mux.HandleFunc("POST /api/login", sameSite(a.apiLogin))
+	mux.HandleFunc("POST /api/logout", sameSite(func(w http.ResponseWriter, r *http.Request) {
 		a.endSession(w, r)
 		writeJSON(w, map[string]bool{"ok": true})
-	})
+	}))
 	mux.HandleFunc("GET /api/roots/available", a.apiRootsAvailable)
 
 	us := a.requireUser             // any signed-in user or API token; results follow their grants
@@ -386,7 +415,7 @@ func (a *App) apiRootsAvailable(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !a.setupDone() && a.needsSetupKey(r) && !hmacEqual(r.URL.Query().Get("key"), a.setupKey) {
+	if !a.setupDone() && a.needsSetupKey(r) && !hmacEqual(r.URL.Query().Get("key"), a.currentSetupKey()) {
 		httpErr(w, 403, "setup key required")
 		return
 	}
@@ -411,7 +440,7 @@ func (a *App) apiSetup(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad request")
 		return
 	}
-	if a.needsSetupKey(r) && !hmacEqual(in.Key, a.setupKey) {
+	if a.needsSetupKey(r) && !hmacEqual(in.Key, a.currentSetupKey()) {
 		httpErr(w, 403, "setup key required: it is printed in the container log")
 		return
 	}
@@ -488,17 +517,26 @@ func (a *App) apiLogin(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad request")
 		return
 	}
-	key := "login:" + a.clientIP(r)
-	if !a.limiter.allow(key, 8, 15*time.Minute) {
+	// Guesses are limited per client (8 per 15 minutes) and per account (30 per
+	// hour, so many addresses can't share the work). A correct password is refunded.
+	ipKey := "login:" + limitIP(a.clientIP(r))
+	userKey := "login-user:" + strings.ToLower(trunc(strings.TrimSpace(in.User), 64))
+	if !a.limiter.take(ipKey, 8, 15*time.Minute) {
 		httpErr(w, 429, "too many attempts; wait 15 minutes")
+		return
+	}
+	if !a.limiter.take(userKey, 30, time.Hour) {
+		a.limiter.refund(ipKey)
+		httpErr(w, 429, "too many attempts for this account; wait an hour")
 		return
 	}
 	u, ok := a.checkPassword(in.User, in.Password)
 	if !ok {
-		a.limiter.fail(key)
 		httpErr(w, 401, "wrong username or password")
 		return
 	}
+	a.limiter.refund(ipKey)
+	a.limiter.refund(userKey)
 	if u.TwoFA {
 		if strings.TrimSpace(in.Code) == "" {
 			w.Header().Set("Content-Type", "application/json")
@@ -506,13 +544,18 @@ func (a *App) apiLogin(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"error":"enter the code from your authenticator app","need_code":true}`))
 			return
 		}
+		// codes are limited per account, wherever the guesses come from
+		codeKey := "2fa-code:" + strconv.FormatInt(u.ID, 10)
+		if !a.limiter.take(codeKey, 10, 15*time.Minute) {
+			httpErr(w, 429, "too many codes tried; wait 15 minutes")
+			return
+		}
 		if !a.checkSecondFactor(u, in.Code) {
-			a.limiter.fail(key)
 			httpErr(w, 401, "that code is wrong or was already used")
 			return
 		}
+		a.limiter.refund(codeKey)
 	}
-	a.limiter.clear(key)
 	a.newSession(w, r, u.ID)
 	writeJSON(w, map[string]bool{"ok": true})
 }
@@ -536,6 +579,10 @@ func (a *App) apiLs(w http.ResponseWriter, r *http.Request) {
 func (a *App) apiSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	sq := SearchQuery{Q: q.Get("q"), Kind: q.Get("kind"), Root: q.Get("root"), Sort: q.Get("sort"), Limit: atoiDef(q.Get("limit"), 200)}
+	if err := checkQuery(sq.Q); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	sq.After, _ = strconv.ParseInt(q.Get("after"), 10, 64)
 	sq.MinSize, _ = strconv.ParseInt(q.Get("min"), 10, 64)
 	sq.MaxSize, _ = strconv.ParseInt(q.Get("max"), 10, 64)
@@ -819,15 +866,15 @@ func (a *App) apiPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	// a stolen session alone shouldn't be able to guess the password at full speed
 	key := "pw:" + strconv.FormatInt(u.ID, 10)
-	if !a.limiter.allow(key, 8, 15*time.Minute) {
+	if !a.limiter.take(key, 8, 15*time.Minute) {
 		httpErr(w, 429, "too many attempts; wait 15 minutes")
 		return
 	}
 	if _, ok := a.checkPassword(u.Name, in.Current); !ok {
-		a.limiter.fail(key)
 		httpErr(w, 401, "current password is wrong")
 		return
 	}
+	a.limiter.refund(key)
 	if err := checkNewPassword(in.New); err != nil {
 		httpErr(w, 400, "new "+err.Error())
 		return
@@ -836,7 +883,6 @@ func (a *App) apiPassword(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 500, err.Error())
 		return
 	}
-	a.limiter.clear(key)
 	a.dropSessions(u.ID) // sign out everywhere else
 	a.newSession(w, r, u.ID)
 	writeJSON(w, map[string]bool{"ok": true})
@@ -999,6 +1045,7 @@ func (a *App) apiDeleteShare(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = a.st.exec(`DELETE FROM share_items WHERE share_id=?`, s.ID)
 	_, _ = a.st.exec(`DELETE FROM shares WHERE id=?`, s.ID)
-	_, _ = a.st.exec(`DELETE FROM share_events WHERE share_id=?`, s.ID)
+	// share_events are kept: who opened what stays in the admins' activity log
+	// (pruned after a year like all link activity)
 	writeJSON(w, map[string]bool{"ok": true})
 }

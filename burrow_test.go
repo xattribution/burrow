@@ -377,13 +377,14 @@ func TestTwoFactor(t *testing.T) {
 	var en struct {
 		RecoveryCodes []string `json:"recovery_codes"`
 	}
-	_ = json.Unmarshal(e.do("POST", "/api/2fa/enable", map[string]any{"code": code}, 200), &en)
+	e.do("POST", "/api/2fa/enable", map[string]any{"code": code, "password": "wrong-password"}, 401)
+	_ = json.Unmarshal(e.do("POST", "/api/2fa/enable", map[string]any{"code": code, "password": "longenough1"}, 200), &en)
 	if len(en.RecoveryCodes) != 10 {
 		t.Fatal("recovery codes")
 	}
 	login := func(code string) int {
 		b, _ := json.Marshal(map[string]string{"user": "admin", "password": "longenough1", "code": code})
-		r, _ := http.Post(e.srv.URL+"/api/login", "application/json", bytes.NewReader(b))
+		r, _ := postJSON(e.srv.URL+"/api/login", b)
 		r.Body.Close()
 		return r.StatusCode
 	}

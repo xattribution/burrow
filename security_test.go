@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -256,6 +257,7 @@ func TestSetupNeedsKeyUnlessLocal(t *testing.T) {
 	post := func(body map[string]any, hdr map[string]string) int {
 		b, _ := json.Marshal(body)
 		req, _ := http.NewRequest("POST", srv.URL+"/api/setup", bytes.NewReader(b))
+		req.Header.Set("X-Burrow", "1")
 		for k, v := range hdr {
 			req.Header.Set(k, v)
 		}
@@ -483,5 +485,310 @@ func TestVerifyPublic(t *testing.T) {
 	verifyPublic(&out, tl.url, "")
 	if !strings.Contains(out.String(), "web UI or API is public") {
 		t.Fatalf("exposed UI not flagged:\n%s", out.String())
+	}
+}
+
+// postJSON posts the way the web UI does (JSON with the X-Burrow header).
+func postJSON(u string, body []byte) (*http.Response, error) {
+	req, _ := http.NewRequest("POST", u, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Burrow", "1")
+	r, err := http.DefaultClient.Do(req)
+	if err == nil {
+		r.Body.Close()
+	}
+	return r, err
+}
+
+// TestParallelGuessesAreLimited: guesses sent all at once can't get past the limit.
+func TestParallelGuessesAreLimited(t *testing.T) {
+	e := setup(t)
+	b, _ := json.Marshal(map[string]string{"user": "admin", "password": "wrong-password"})
+	codes := make(chan int, 40)
+	for i := 0; i < 40; i++ {
+		go func() {
+			r, err := postJSON(e.srv.URL+"/api/login", b)
+			if err != nil {
+				codes <- 0
+				return
+			}
+			codes <- r.StatusCode
+		}()
+	}
+	answered := 0
+	for i := 0; i < 40; i++ {
+		if c := <-codes; c == 401 {
+			answered++
+		}
+	}
+	if answered > 8 {
+		t.Fatalf("%d of 40 parallel guesses were checked (limit 8)", answered)
+	}
+	// a correct password is refunded, so it doesn't count toward the limit
+	e2 := setup(t)
+	ok, _ := json.Marshal(map[string]string{"user": "admin", "password": "longenough1"})
+	for i := 0; i < 12; i++ {
+		if r, _ := postJSON(e2.srv.URL+"/api/login", ok); r.StatusCode != 200 {
+			t.Fatalf("correct sign-in %d: %d", i, r.StatusCode)
+		}
+	}
+}
+
+// TestCrossSiteFormsAreRefused: a page on another site can't sign a visitor in or
+// out, or run setup, with a text/plain form posting JSON-looking data.
+func TestCrossSiteFormsAreRefused(t *testing.T) {
+	e := setup(t)
+	for _, p := range []string{"/api/login", "/api/logout", "/api/setup"} {
+		r, err := http.Post(e.srv.URL+p, "text/plain", strings.NewReader(`{"user":"admin","password":"longenough1","x":"`+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		if r.StatusCode != 403 {
+			t.Fatalf("%s without X-Burrow: %d", p, r.StatusCode)
+		}
+	}
+}
+
+func TestExactNamesAndHiddenNameCase(t *testing.T) {
+	e := setup(t)
+	if !e.app.exactName("DOCS/Taxes/2024-return.pdf") {
+		t.Fatal("exact path refused")
+	}
+	for _, p := range []string{"DOCS/taxes/2024-return.pdf", "DOCS/Taxes/2024-RETURN.pdf", "DOCS/TAXES"} {
+		if e.app.exactName(p) {
+			t.Fatalf("%s accepted with a different spelling", p)
+		}
+	}
+	// not indexed yet: checked against the directory itself
+	_ = os.WriteFile(filepath.Join(e.data, "DOCS", "fresh.txt"), []byte("x"), 0o644)
+	if !e.app.exactName("DOCS/fresh.txt") || e.app.exactName("DOCS/FRESH.txt") {
+		t.Fatal("unindexed file spelling check")
+	}
+	for _, n := range []string{".ZFS", "@EADIR", "THUMBS.DB", ".BURROW-PART-1"} {
+		if !e.app.idx.excluded(n) {
+			t.Fatalf("hidden name %s matched case-sensitively", n)
+		}
+	}
+	// On a case-insensitive filesystem a different spelling must not get past a No
+	// access grant. Skipped where this machine can't make one.
+	lib := caseInsensitiveDir(t)
+	if lib == "" {
+		t.Log("no case-insensitive filesystem available; spelling checked above without it")
+		return
+	}
+	_ = os.MkdirAll(filepath.Join(lib, "DOCS", "HR"), 0o755)
+	_ = os.WriteFile(filepath.Join(lib, "DOCS", "HR", "pay.txt"), []byte("salaries"), 0o644)
+	_ = os.WriteFile(filepath.Join(lib, "DOCS", "open.txt"), []byte("hello"), 0o644)
+	if b, err := os.ReadFile(filepath.Join(lib, "docs", "hr", "PAY.txt")); err != nil || string(b) != "salaries" {
+		t.Skip("filesystem isn't case-insensitive after all")
+	}
+	e.app.cfg.DataDir = lib
+	e.app.st.setJSON("roots", []string{"DOCS"})
+	e.app.idx.cfg.DataDir = lib
+	e.app.idx.reloadSettings()
+	e.app.idx.fullScan()
+	e.mkUser("ann", false, Grant{Path: "DOCS", Read: true}, Grant{Path: "DOCS/HR", Read: false})
+	ann := e.as("ann", "longenough-ann")
+	ann.do("GET", "/api/raw?path=DOCS/open.txt", nil, 200)
+	for _, p := range []string{"DOCS/HR/pay.txt", "DOCS/hr/pay.txt", "DOCS/Hr/pay.txt", "DOCS/hR/PAY.txt", "docs/HR/pay.txt"} {
+		ann.do("GET", "/api/raw?path="+url.QueryEscape(p), nil, 404)
+	}
+	var ls struct{ Entries []Entry }
+	_ = json.Unmarshal(ann.do("GET", "/api/ls?path=DOCS", nil, 200), &ls)
+	if got := names(ls.Entries); strings.Join(got, ",") != "open.txt" {
+		t.Fatalf("listing: %v", got)
+	}
+	ann.do("GET", "/api/ls?path=DOCS/hr", nil, 403)
+	// the same through a link ann makes of DOCS
+	e.do("PATCH", "/api/users/"+itoa(mustUser(t, e, "ann").ID), map[string]any{"grants": []Grant{{Path: "DOCS", Read: true, Share: true}, {Path: "DOCS/HR", Read: false}}}, 200)
+	var s Share
+	_ = json.Unmarshal(ann.do("POST", "/api/shares", map[string]any{"path": "DOCS"}, 200), &s)
+	for _, p := range []string{"HR/pay.txt", "hr/pay.txt", "hR/PAY.txt"} {
+		if c, _ := publicGet(t, http.DefaultClient, e.srv.URL+"/s/"+s.ID+"/raw?p="+url.QueryEscape(p)); c != 404 {
+			t.Fatalf("link %s: %d", p, c)
+		}
+	}
+}
+
+func mustUser(t *testing.T, e *tenv, name string) *User {
+	u, err := e.app.userByName(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+// caseInsensitiveDir returns an empty folder on a case-insensitive filesystem, made
+// with a casefold tmpfs (Linux 6.13+, needs root) or ciopfs (FUSE), or "" if neither works.
+func caseInsensitiveDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	mnt := filepath.Join(dir, "mnt")
+	_ = os.Mkdir(mnt, 0o755)
+	if exec.Command("mount", "-t", "tmpfs", "-o", "casefold", "tmpfs", mnt).Run() == nil {
+		t.Cleanup(func() { _ = exec.Command("umount", mnt).Run() })
+		lib := filepath.Join(mnt, "lib")
+		_ = os.Mkdir(lib, 0o755)
+		if exec.Command("chattr", "+F", lib).Run() == nil {
+			return lib
+		}
+	}
+	if _, err := exec.LookPath("ciopfs"); err == nil {
+		back := filepath.Join(dir, "back")
+		_ = os.Mkdir(back, 0o755)
+		cmnt := filepath.Join(dir, "ciopfs")
+		_ = os.Mkdir(cmnt, 0o755)
+		if exec.Command("ciopfs", back, cmnt).Run() == nil {
+			t.Cleanup(func() {
+				if exec.Command("fusermount", "-u", cmnt).Run() != nil {
+					_ = exec.Command("umount", cmnt).Run()
+				}
+			})
+			return cmnt
+		}
+	}
+	return ""
+}
+
+func TestMalformedForwardedAddressIgnored(t *testing.T) {
+	a := &App{}
+	_, n, _ := net.ParseCIDR("127.0.0.1/32")
+	a.proxyNets = []*net.IPNet{n}
+	for _, xff := range []string{"not-an-ip", "1.2.3.4, junk", strings.Repeat("a", 5000)} {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = "127.0.0.1:5"
+		r.Header.Set("X-Forwarded-For", xff)
+		if got := a.clientIP(r); got != "127.0.0.1" {
+			t.Fatalf("%q gave %q", xff[:min(len(xff), 20)], got)
+		}
+	}
+}
+
+func TestMCPInputBounds(t *testing.T) {
+	e := setup(t)
+	var tok struct{ Token string }
+	_ = json.Unmarshal(e.do("POST", "/api/tokens", map[string]any{"name": "t"}, 200), &tok)
+	code, b := e.bearer(tok.Token, "POST", "/mcp", json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_text_file","arguments":{"path":"DOCS/notes.txt","max_kb":"NaN"}}}`))
+	if code != 200 || !strings.Contains(string(b), "hello notes") {
+		t.Fatalf("NaN size: %d %s", code, b)
+	}
+	batch := "[" + strings.TrimSuffix(strings.Repeat(`{"jsonrpc":"2.0","id":1,"method":"ping"},`, 11), ",") + "]"
+	if _, b := e.bearer(tok.Token, "POST", "/mcp", json.RawMessage(batch)); !strings.Contains(string(b), "limited to 10") {
+		t.Fatalf("11-message batch: %s", b)
+	}
+}
+
+func TestSearchBounds(t *testing.T) {
+	e := setup(t)
+	e.do("GET", "/api/search?q="+url.QueryEscape(strings.Repeat("a ", 13)), nil, 400)
+	e.do("GET", "/api/search?q="+strings.Repeat("x", 300), nil, 400)
+	e.do("GET", "/api/search?q="+url.QueryEscape(strings.Repeat("a ", 12)), nil, 200)
+}
+
+func TestChangeLogHonorsHiddenNames(t *testing.T) {
+	e := setup(t)
+	_ = os.WriteFile(filepath.Join(e.data, "DOCS", "secret-plan.txt"), []byte("x"), 0o644)
+	e.app.idx.fullScan()
+	e.do("PUT", "/api/settings", map[string]any{"excludes": ".zfs\nsecret-*"}, 200)
+	var cs []Change
+	_ = json.Unmarshal(e.do("GET", "/api/changes", nil, 200), &cs)
+	for _, c := range cs {
+		if strings.Contains(c.Path, "secret-plan") {
+			t.Fatalf("hidden file in the change log: %+v", c)
+		}
+	}
+}
+
+func TestDeletingALinkKeepsItsHistory(t *testing.T) {
+	e := setup(t)
+	e.mkUser("bob", false, bobGrants...)
+	bob := e.as("bob", "longenough-bob")
+	var s Share
+	_ = json.Unmarshal(bob.do("POST", "/api/shares", map[string]any{"path": "DOCS/notes.txt"}, 200), &s)
+	r, _ := http.Get(e.srv.URL + "/s/" + s.ID)
+	r.Body.Close()
+	bob.do("DELETE", "/api/shares/"+s.ID, nil, 200)
+	var ev []ShareEvent
+	_ = json.Unmarshal(e.do("GET", "/api/events", nil, 200), &ev)
+	found := false
+	for _, x := range ev {
+		found = found || x.Share == s.ID
+	}
+	if !found {
+		t.Fatal("deleting a link erased its history")
+	}
+}
+
+func TestAccountRecoveryRevokesTokens(t *testing.T) {
+	e := setup(t)
+	u := e.mkUser("bob", false, bobGrants...)
+	var tok struct{ Token string }
+	_ = json.Unmarshal(e.as("bob", "longenough-bob").do("POST", "/api/tokens", map[string]any{"name": "t"}, 200), &tok)
+	e.do("PATCH", "/api/users/"+itoa(u.ID), map[string]any{"password": "brand-new-password"}, 200)
+	if c, _ := e.bearer(tok.Token, "GET", "/api/ls?path=", nil); c != 401 {
+		t.Fatalf("token after an admin password reset: %d", c)
+	}
+}
+
+// TestLastAdminRace: two admins demoting each other at the same moment can't
+// leave the server with no admin.
+func TestLastAdminRace(t *testing.T) {
+	e := setup(t)
+	var users []User
+	_ = json.Unmarshal(e.do("GET", "/api/users", nil, 200), &users)
+	first := users[0]
+	for round := 0; round < 20; round++ {
+		second := e.mkUser(fmt.Sprintf("adm%d", round), true)
+		other := e.as(second.Name, "longenough-"+second.Name)
+		done := make(chan struct{}, 2)
+		go func() {
+			req, _ := http.NewRequest("PATCH", e.srv.URL+"/api/users/"+itoa(second.ID), strings.NewReader(`{"admin":false}`))
+			req.Header.Set("X-Burrow", "1")
+			if r, err := e.c.Do(req); err == nil {
+				r.Body.Close()
+			}
+			done <- struct{}{}
+		}()
+		go func() {
+			req, _ := http.NewRequest("PATCH", e.srv.URL+"/api/users/"+itoa(first.ID), strings.NewReader(`{"admin":false}`))
+			req.Header.Set("X-Burrow", "1")
+			if r, err := other.c.Do(req); err == nil {
+				r.Body.Close()
+			}
+			done <- struct{}{}
+		}()
+		<-done
+		<-done
+		if n := e.app.adminCount(); n < 1 {
+			t.Fatalf("round %d: no active admin left", round)
+		}
+		// put things back for the next round
+		_, _ = e.app.st.exec(`UPDATE users SET admin=1 WHERE id=?`, first.ID)
+		_, _ = e.app.st.exec(`DELETE FROM users WHERE id=?`, second.ID)
+	}
+}
+
+func TestSecretsOnDiskArePrivate(t *testing.T) {
+	e := setup(t)
+	fi, err := os.Stat(filepath.Join(e.app.cfg.StateDir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("database mode %v", fi.Mode().Perm())
+	}
+	// if every account disappears while running, setup still needs a fresh key
+	_, _ = e.app.st.exec(`DELETE FROM users`)
+	e.app.keyMu.Lock()
+	e.app.setupKey = ""
+	e.app.keyMu.Unlock()
+	req, _ := http.NewRequest("POST", e.srv.URL+"/api/setup", strings.NewReader(`{"user":"x","password":"longenough1","key":""}`))
+	req.Header.Set("X-Burrow", "1")
+	req.Header.Set("X-Forwarded-For", "203.0.113.4")
+	r, _ := http.DefaultClient.Do(req)
+	r.Body.Close()
+	if r.StatusCode != 403 || e.app.setupKey == "" {
+		t.Fatalf("setup with an empty key: %d", r.StatusCode)
 	}
 }

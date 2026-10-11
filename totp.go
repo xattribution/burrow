@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -124,14 +125,26 @@ func (a *App) api2FAStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"secret": secret, "uri": uri, "qr": "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)})
 }
 
-// POST /api/2fa/enable {code}: confirm the app works, turn 2FA on, hand out recovery codes once.
+// POST /api/2fa/enable {code, password}: confirm the app works, turn 2FA on, hand
+// out recovery codes once. The password is required so a stolen session can't
+// lock the owner out by putting 2FA on the attacker's phone.
 func (a *App) api2FAEnable(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
-	var in struct{ Code string }
+	var in struct{ Code, Password string }
 	if err := readJSON(r, &in); err != nil {
 		httpErr(w, 400, "bad request")
 		return
 	}
+	key := "2fa-on:" + strconv.FormatInt(u.ID, 10)
+	if !a.limiter.take(key, 8, 15*time.Minute) {
+		httpErr(w, 429, "too many attempts; wait 15 minutes")
+		return
+	}
+	if _, ok := a.checkPassword(u.Name, in.Password); !ok {
+		httpErr(w, 401, "password is wrong")
+		return
+	}
+	a.limiter.refund(key)
 	if u.pending == "" {
 		httpErr(w, 400, "start setup first")
 		return
@@ -155,16 +168,16 @@ func (a *App) api2FADisable(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad request")
 		return
 	}
-	key := "2fa:" + a.clientIP(r)
-	if !a.limiter.allow(key, 8, 15*time.Minute) {
+	key := "2fa-off:" + strconv.FormatInt(u.ID, 10)
+	if !a.limiter.take(key, 8, 15*time.Minute) {
 		httpErr(w, 429, "too many attempts; wait 15 minutes")
 		return
 	}
 	if _, ok := a.checkPassword(u.Name, in.Password); !ok || !a.checkSecondFactor(u, in.Code) {
-		a.limiter.fail(key)
 		httpErr(w, 401, "password or code is wrong")
 		return
 	}
+	a.limiter.refund(key)
 	_, _ = a.st.exec(`UPDATE users SET totp_secret='', totp_pending='', totp_last=0, totp_recovery='[]' WHERE id=?`, u.ID)
 	writeJSON(w, map[string]bool{"ok": true})
 }

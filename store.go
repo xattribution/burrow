@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"os"
 	"sync"
 	"time"
 
@@ -103,6 +104,11 @@ func openStore(path string) (*Store, error) {
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS share_items_path ON share_items(path)`)
 	if err := migrateUsers(db); err != nil {
 		return nil, err
+	}
+	// the database holds password hashes, 2FA secrets and the key that signs share
+	// cookies: readable by Burrow's user only
+	for _, f := range []string{path, path + "-wal", path + "-shm"} {
+		_ = os.Chmod(f, 0o600)
 	}
 	s := &Store{db: db}
 	if s.get("secret") == "" {

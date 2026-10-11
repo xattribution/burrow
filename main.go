@@ -67,7 +67,9 @@ func loadConfig() Config {
 	if strings.EqualFold(c.PublicAddr, "off") {
 		c.PublicAddr = ""
 	}
-	for _, p := range strings.Split(env("BURROW_TRUSTED_PROXIES", "127.0.0.1/32,::1/128,172.16.0.0/12"), ",") {
+	// Only loopback by default: a reverse proxy elsewhere (another container, another
+	// machine) must be listed, or anyone who can reach Burrow could claim any address.
+	for _, p := range strings.Split(env("BURROW_TRUSTED_PROXIES", "127.0.0.1/32,::1/128"), ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			c.TrustedProxies = append(c.TrustedProxies, p)
 		}
@@ -123,13 +125,17 @@ func main() {
 			if _, err := s.db.Exec(`VACUUM INTO ?`, os.Args[2]); err != nil {
 				log.Fatal(err)
 			}
+			_ = os.Chmod(os.Args[2], 0o600) // holds password hashes and 2FA secrets
 			println("backup written to " + os.Args[2])
 			return
 		case "reset-password":
-			// burrow reset-password <username>: sets a temporary password and turns off that user's 2FA
+			// burrow reset-password <username> [--admin]: account recovery. Sets a temporary
+			// password, turns off 2FA, and ends every session and API token of that user.
+			// --admin also makes the account an active admin (if no admin is left).
 			if len(os.Args) < 3 {
-				log.Fatal("usage: burrow reset-password <username>")
+				log.Fatal("usage: burrow reset-password <username> [--admin]")
 			}
+			makeAdmin := len(os.Args) > 3 && os.Args[3] == "--admin"
 			cfg := loadConfig()
 			s, err := openStore(filepath.Join(cfg.StateDir, "burrow.db"))
 			if err != nil {
@@ -144,9 +150,18 @@ func main() {
 			if err := a.setPassword(u.ID, tmp); err != nil {
 				log.Fatal(err)
 			}
-			_, _ = s.exec(`UPDATE users SET totp_secret='', totp_pending='', totp_last=0, totp_recovery='[]', disabled=0 WHERE id=?`, u.ID)
+			_, _ = s.exec(`UPDATE users SET totp_secret='', totp_pending='', totp_last=0, totp_recovery='[]' WHERE id=?`, u.ID)
+			_, _ = s.exec(`DELETE FROM tokens WHERE user_id=?`, u.ID)
 			a.dropSessions(u.ID)
-			println("Temporary password for " + u.Name + ": " + tmp + "\nSign in and change it under Settings. Two-factor sign-in was turned off for this user.")
+			if makeAdmin {
+				_, _ = s.exec(`UPDATE users SET admin=1, disabled=0 WHERE id=?`, u.ID)
+			}
+			println("Temporary password for " + u.Name + ": " + tmp + "\nSign in and change it under Settings. Two-factor sign-in was turned off and API tokens were revoked for this user.")
+			if a.adminCount() == 0 {
+				println("There is no active admin. Run this again with --admin to make " + u.Name + " one.")
+			} else if u.Disabled && !makeAdmin {
+				println(u.Name + " is turned off; an admin can turn the account back on under Users.")
+			}
 			return
 		}
 	}

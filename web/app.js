@@ -719,7 +719,7 @@ async function openSharePanel(id) {
       h('button', { class: 'btn danger', onclick: async ev => {
         const b = ev.currentTarget;
         if (b.dataset.armed) { await api('/api/shares/' + id + (purge && purge.querySelector('input').checked ? '?purge=1' : ''), { method: 'DELETE' }); nav({ share: '' }, true); return; }
-        b.dataset.armed = '1'; b.textContent = `Delete “${x.label || x.id}” and its history`;
+        b.dataset.armed = '1'; b.textContent = `Delete “${x.label || x.id}”`;
         if (purge) purge.hidden = false;
       } }, 'Delete link'), purge),
     h('h3', {}, 'Activity'),
@@ -1051,12 +1051,14 @@ function twoFactorSection(st) {
         h('p', {}, 'Scan this with an authenticator app (Aegis, 1Password, Google Authenticator), then enter the code it shows.'),
         h('div', { class: 'qr' }, h('img', { src: d.qr, alt: 'Authenticator setup QR code' })),
         h('details', {}, h('summary', {}, 'Enter the key by hand'), h('div', { class: 'secret' }, d.secret)),
-        h('label', { class: 'field' }, h('span', {}, 'Code from the app'), h('input', { name: 'code', autocomplete: 'one-time-code', inputmode: 'numeric', class: 'mono', required: true, maxlength: 6 })),
+        h('div', { class: 'grid2' },
+          h('label', { class: 'field' }, h('span', {}, 'Code from the app'), h('input', { name: 'code', autocomplete: 'one-time-code', inputmode: 'numeric', class: 'mono', required: true, maxlength: 6 })),
+          h('label', { class: 'field' }, h('span', {}, 'Your password'), h('input', { name: 'pw', type: 'password', autocomplete: 'current-password', required: true }))),
         err, h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Turn on')));
       f.addEventListener('submit', async e => {
         e.preventDefault();
         try {
-          const r = await api('/api/2fa/enable', { method: 'POST', body: { code: f.code.value } });
+          const r = await api('/api/2fa/enable', { method: 'POST', body: { code: f.code.value, password: f.pw.value } });
           const txt = r.recovery_codes.join('\n');
           box.replaceChildren(
             h('p', {}, h('b', {}, 'Two-factor sign-in is on. Save these recovery codes now. Each works once if you lose your phone, and they won’t be shown again.')),
