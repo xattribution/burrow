@@ -6,7 +6,8 @@ services:
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
-      - "${PORT:-47823}:47823"
+      - "${PORT:-47823}:47823"                 # the whole app: keep this one on your LAN
+      - "${PUBLIC_PORT:-47824}:47824"          # share links only: point your reverse proxy here
     environment:
       TZ: ${TZ:-UTC}
     volumes:

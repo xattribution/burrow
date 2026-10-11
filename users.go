@@ -463,6 +463,10 @@ func (a *App) adminCount() int {
 }
 
 func (a *App) apiPatchUser(w http.ResponseWriter, r *http.Request) {
+	// one change at a time, so two admins demoting each other can't both pass the
+	// "keep one active admin" check
+	a.adminMu.Lock()
+	defer a.adminMu.Unlock()
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	u, err := a.loadUser(id)
 	if err != nil {
@@ -500,11 +504,13 @@ func (a *App) apiPatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Password != nil {
+		// an admin reset is account recovery: end every session and API token
 		if err := a.setPassword(id, *in.Password); err != nil {
 			httpErr(w, 500, err.Error())
 			return
 		}
 		a.dropSessions(id)
+		_, _ = a.st.exec(`DELETE FROM tokens WHERE user_id=?`, id)
 	}
 	if in.Admin != nil {
 		_, _ = a.st.exec(`UPDATE users SET admin=? WHERE id=?`, *in.Admin, id)
@@ -531,6 +537,8 @@ func (a *App) apiPatchUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) apiDeleteUser(w http.ResponseWriter, r *http.Request) {
+	a.adminMu.Lock()
+	defer a.adminMu.Unlock()
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	u, err := a.loadUser(id)
 	if err != nil {

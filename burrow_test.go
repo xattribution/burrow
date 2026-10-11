@@ -155,7 +155,8 @@ func TestChangeLogAfterInitialScan(t *testing.T) {
 func TestShareScopeAndLimits(t *testing.T) {
 	e := setup(t)
 	var s Share
-	_ = json.Unmarshal(e.do("POST", "/api/shares", map[string]any{"path": "PROJECTS/lamp", "expires_hours": 1, "max_downloads": 1}, 200), &s)
+	// two downloads: the preview of inner.txt below uses one (this client keeps no cookies)
+	_ = json.Unmarshal(e.do("POST", "/api/shares", map[string]any{"path": "PROJECTS/lamp", "expires_hours": 1, "max_downloads": 2}, 200), &s)
 	pub := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	get := func(p string) int {
 		r, err := pub.Get(e.srv.URL + p)
@@ -376,13 +377,14 @@ func TestTwoFactor(t *testing.T) {
 	var en struct {
 		RecoveryCodes []string `json:"recovery_codes"`
 	}
-	_ = json.Unmarshal(e.do("POST", "/api/2fa/enable", map[string]any{"code": code}, 200), &en)
+	e.do("POST", "/api/2fa/enable", map[string]any{"code": code, "password": "wrong-password"}, 401)
+	_ = json.Unmarshal(e.do("POST", "/api/2fa/enable", map[string]any{"code": code, "password": "longenough1"}, 200), &en)
 	if len(en.RecoveryCodes) != 10 {
 		t.Fatal("recovery codes")
 	}
 	login := func(code string) int {
 		b, _ := json.Marshal(map[string]string{"user": "admin", "password": "longenough1", "code": code})
-		r, _ := http.Post(e.srv.URL+"/api/login", "application/json", bytes.NewReader(b))
+		r, _ := postJSON(e.srv.URL+"/api/login", b)
 		r.Body.Close()
 		return r.StatusCode
 	}
@@ -449,30 +451,49 @@ func TestServingIsInert(t *testing.T) {
 	}
 }
 
-func TestRangeDoesNotBurnLimit(t *testing.T) {
+// TestDownloadLimit: on a limited link each browser counts once per file, whether it
+// previews or downloads; nothing fetches the file without counting.
+func TestDownloadLimit(t *testing.T) {
 	e := setup(t)
 	var s Share
-	_ = json.Unmarshal(e.do("POST", "/api/shares", map[string]any{"path": "DOCS/notes.txt", "max_downloads": 1}, 200), &s)
-	jar, _ := cookiejar.New(nil)
-	browser := &http.Client{Jar: jar}
-	stranger := &http.Client{}
-	get := func(rg string) int { return rangeGet(t, browser, e.srv.URL+"/s/"+s.ID+"/dl", rg) }
-	defer func() {
-		if c := rangeGet(t, stranger, e.srv.URL+"/s/"+s.ID+"/dl", "bytes=4-"); c != 410 {
-			t.Fatalf("range without resume cookie allowed after limit: %d", c)
+	_ = json.Unmarshal(e.do("POST", "/api/shares", map[string]any{"path": "DOCS/notes.txt", "max_downloads": 2}, 200), &s)
+	newBrowser := func() *http.Client { jar, _ := cookiejar.New(nil); return &http.Client{Jar: jar} }
+	a, b, c := newBrowser(), newBrowser(), newBrowser()
+	dl := e.srv.URL + "/s/" + s.ID + "/dl"
+	raw := e.srv.URL + "/s/" + s.ID + "/raw"
+	count := func() int64 { g, _ := e.app.getShare(s.ID); return g.DL }
+
+	// browser a: a range starting mid-file still counts (no free bytes), then resumes free
+	if code := rangeGet(t, a, dl, "bytes=4-"); code != 206 || count() != 1 {
+		t.Fatalf("mid-file range: %d, count %d", code, count())
+	}
+	if code := rangeGet(t, a, dl, ""); code != 200 || count() != 1 {
+		t.Fatalf("same browser again: %d, count %d", code, count())
+	}
+	if code := rangeGet(t, a, raw, "bytes=2-"); code != 206 || count() != 1 {
+		t.Fatalf("same browser preview: %d, count %d", code, count())
+	}
+	// browser b: a preview counts too
+	if code := rangeGet(t, b, raw, ""); code != 200 || count() != 2 {
+		t.Fatalf("preview: %d, count %d", code, count())
+	}
+	// limit reached: a new browser gets nothing, by any route
+	for _, u := range []string{dl, raw} {
+		for _, rg := range []string{"", "bytes=0-", "bytes=1-", "bytes=6-"} {
+			if code := rangeGet(t, c, u, rg); code != 410 {
+				t.Fatalf("%s %q after the limit: %d", u, rg, code)
+			}
 		}
-	}()
-	if c := get("bytes=0-3"); c != 206 {
-		t.Fatalf("first: %d", c)
 	}
-	if c := get("bytes=4-"); c != 206 {
-		t.Fatalf("resume: %d", c)
+	// browsers already counted can still resume or seek
+	if code := rangeGet(t, a, dl, "bytes=6-"); code != 206 {
+		t.Fatalf("resume after the limit: %d", code)
 	}
-	if c := get(""); c != 410 {
-		t.Fatalf("second full download allowed: %d", c)
+	if code := rangeGet(t, b, raw, "bytes=1-"); code != 206 {
+		t.Fatalf("seek after the limit: %d", code)
 	}
-	if c := get("bytes=6-"); c != 206 {
-		t.Fatalf("same browser resume after limit refused: %d", c)
+	if count() != 2 {
+		t.Fatalf("count: %d", count())
 	}
 }
 

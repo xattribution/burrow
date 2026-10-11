@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -156,6 +157,10 @@ func (a *App) handleMCP(w http.ResponseWriter, r *http.Request) {
 			writeRPC(w, rpcResp{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcErr{-32700, "parse error"}})
 			return
 		}
+		if len(reqs) > 10 {
+			writeRPC(w, rpcResp{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcErr{-32600, "batches are limited to 10 messages"}})
+			return
+		}
 		var out []rpcResp
 		for _, q := range reqs {
 			if resp, ok := a.mcpDispatch(r, q); ok {
@@ -258,16 +263,19 @@ func argS(m map[string]any, k string) string {
 	return ""
 }
 
+// argF reads a number argument; anything that isn't a finite number counts as 0.
 func argF(m map[string]any, k string) float64 {
+	var f float64
 	switch v := m[k].(type) {
 	case float64:
-		return v
+		f = v
 	case string:
-		var f float64
 		_, _ = fmt.Sscanf(v, "%g", &f)
-		return f
 	}
-	return 0
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0
+	}
+	return f
 }
 
 type mcpEntry struct {

@@ -7,7 +7,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var errNotAllowed = errors.New("path not available")
@@ -23,7 +26,7 @@ func cleanRel(p string) string {
 // enabled root, inside an excluded folder, or reached through a symlink.
 func (a *App) resolve(rel string) (string, string, error) {
 	rel = cleanRel(rel)
-	if !a.idx.allowed(rel) {
+	if !a.idx.allowed(rel) || !a.exactName(rel) {
 		return "", "", errNotAllowed
 	}
 	abs := filepath.Join(a.cfg.DataDir, filepath.FromSlash(rel))
@@ -36,6 +39,97 @@ func (a *App) resolve(rel string) (string, string, error) {
 		return "", "", errNotAllowed
 	}
 	return abs, rel, nil
+}
+
+// openNoFollow opens a file that resolve (or an upload folder lookup) already
+// approved, so that nothing can be swapped in between the check and the open: no
+// component may be a symlink and the path can't leave the library or drop folder.
+// It uses openat2 (Linux 5.6+); where that is unavailable it at least refuses a
+// symlink as the last component.
+func (a *App) openNoFollow(abs string) (*os.File, error) {
+	under := func(dir string) bool { return dir != "" && strings.HasPrefix(abs, dir+string(os.PathSeparator)) }
+	base := a.cfg.DataDir
+	// the drop folder may sit inside the library; the deeper base is the tighter one
+	if under(a.cfg.DropDir) && (!under(base) || len(a.cfg.DropDir) > len(base)) {
+		base = a.cfg.DropDir
+	}
+	rel, err := filepath.Rel(base, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return nil, errNotAllowed
+	}
+	dir, err := unix.Open(base, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(dir)
+	fd, err := unix.Openat2(dir, rel, &unix.OpenHow{
+		Flags:   unix.O_RDONLY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS,
+	})
+	if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EPERM) {
+		return os.OpenFile(abs, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), abs), nil
+}
+
+// exactName checks that every segment of rel is spelled exactly as it is on disk.
+// On a case-insensitive or Unicode-normalizing dataset "DOCS/hr" opens "DOCS/HR",
+// which would slip past a No-access grant or hidden name spelled "DOCS/HR", so a
+// path must match byte for byte. The index (built from directory listings, so its
+// spellings are exact) answers most lookups; whatever isn't indexed yet is checked
+// against the directory listing itself.
+func (a *App) exactName(rel string) bool {
+	segs := strings.Split(rel, "/")
+	known := 1 // allowed() already matched the library name exactly
+	for n := len(segs); n > 1; n-- {
+		var one int
+		if a.st.db.QueryRow(`SELECT 1 FROM files WHERE path=?`, strings.Join(segs[:n], "/")).Scan(&one) == nil {
+			known = n
+			break
+		}
+	}
+	dir := filepath.Join(a.cfg.DataDir, filepath.FromSlash(strings.Join(segs[:known], "/")))
+	for _, seg := range segs[known:] {
+		if !dirHasExact(dir, seg) {
+			return false
+		}
+		dir = filepath.Join(dir, seg)
+	}
+	return true
+}
+
+func dirHasExact(dir, name string) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	for {
+		names, err := f.Readdirnames(1024)
+		for _, n := range names {
+			if n == name {
+				return true
+			}
+		}
+		if err != nil {
+			return false
+		}
+	}
+}
+
+// checkQuery bounds a search so one request can't make the database scan the
+// whole index dozens of times over.
+func checkQuery(q string) error {
+	if len(q) > 256 {
+		return errors.New("search is too long (256 characters at most)")
+	}
+	if len(strings.Fields(q)) > 12 {
+		return errors.New("search has too many words (12 at most)")
+	}
+	return nil
 }
 
 type Entry struct {
@@ -201,6 +295,11 @@ type SearchResult struct {
 // again in Go as a second check.
 func (a *App) search(u *User, sq SearchQuery) (SearchResult, error) {
 	start := time.Now()
+	if err := checkQuery(sq.Q); err != nil {
+		return SearchResult{}, err
+	}
+	a.searchSem <- struct{}{} // a few searches at a time; the rest wait their turn
+	defer func() { <-a.searchSem }()
 	if sq.Limit <= 0 || sq.Limit > 1000 {
 		sq.Limit = 200
 	}
@@ -384,6 +483,9 @@ func (a *App) changes(u *User, since int64, root, kind string, limit int) ([]Cha
 		var c Change
 		if err := rows.Scan(&c.ID, &c.TS, &c.Kind, &c.Path, &c.IsDir, &c.Size); err != nil {
 			return out, err
+		}
+		if !a.idx.allowed(c.Path) { // since hidden, or in a library turned off
+			continue
 		}
 		out = append(out, c)
 	}

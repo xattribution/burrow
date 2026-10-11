@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -21,22 +22,49 @@ func (a *App) clientIP(r *http.Request) string {
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if a.trusted(host) {
-		if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
-			parts := strings.Split(xf, ",")
-			// walk right-to-left past our own proxies
-			for i := len(parts) - 1; i >= 0; i-- {
-				ip := strings.TrimSpace(parts[i])
-				if ip != "" && (!a.trusted(ip) || i == 0) {
-					return ip
-				}
+	if !a.trusted(host) {
+		a.noteUntrustedProxy(host, r)
+		return host
+	}
+	if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
+		parts := strings.Split(xf, ",")
+		// walk right-to-left past our own proxies; a malformed entry voids the header
+		for i := len(parts) - 1; i >= 0; i-- {
+			ip := net.ParseIP(strings.TrimSpace(parts[i]))
+			if ip == nil {
+				return host
+			}
+			if !a.trusted(ip.String()) || i == 0 {
+				return ip.String()
 			}
 		}
-		if xr := r.Header.Get("X-Real-IP"); xr != "" {
-			return strings.TrimSpace(xr)
-		}
+	}
+	if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); ip != nil {
+		return ip.String()
 	}
 	return host
+}
+
+// noteUntrustedProxy logs, once per address, a proxy that sends forwarded headers
+// without being trusted: Burrow then sees every visitor as that proxy, so rate
+// limits are shared and logs show the proxy instead of visitors.
+func (a *App) noteUntrustedProxy(peer string, r *http.Request) {
+	if r.Header.Get("X-Forwarded-For") == "" && r.Header.Get("X-Real-IP") == "" {
+		return
+	}
+	if ip := net.ParseIP(peer); ip == nil || !(ip.IsPrivate() || ip.IsLoopback()) {
+		return // a public address sending these headers is a client, not our proxy
+	}
+	a.noteMu.Lock()
+	defer a.noteMu.Unlock()
+	if a.noted == nil {
+		a.noted = map[string]bool{}
+	}
+	if a.noted[peer] || len(a.noted) > 100 {
+		return
+	}
+	a.noted[peer] = true
+	log.Printf("requests from %s carry X-Forwarded-For, but %s isn't in BURROW_TRUSTED_PROXIES. If it is your reverse proxy, add it so Burrow sees visitors' real addresses (rate limits and logs use them).", peer, peer)
 }
 
 func (a *App) trusted(ip string) bool {
@@ -62,8 +90,11 @@ func (a *App) isHTTPS(r *http.Request) bool {
 	return a.trusted(host) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-// ---- rate limiting for password guesses (login and share passwords) ----
+// ---- rate limiting for guesses (passwords, codes, link ids) ----
 
+// limiter counts attempts per key in a sliding window. take records an attempt
+// and checks the limit in one step, before the guess is evaluated, so parallel
+// requests can't all slip in under the limit; a successful attempt is refunded.
 type limiter struct {
 	mu   sync.Mutex
 	hits map[string][]time.Time
@@ -71,21 +102,18 @@ type limiter struct {
 
 func newLimiter() *limiter { return &limiter{hits: map[string][]time.Time{}} }
 
-// allow reports whether key may try again: at most max failures per window.
-func (l *limiter) allow(key string, max int, window time.Duration) bool {
+// take records an attempt for key and reports whether it is within max per window.
+// An attempt over the limit is not recorded, so waiting out the window always works.
+func (l *limiter) take(key string, max int, window time.Duration) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	cut := time.Now().Add(-window)
+	now := time.Now()
+	cut := now.Add(-window)
 	h := l.hits[key]
 	i := 0
 	for ; i < len(h) && h[i].Before(cut); i++ {
 	}
 	h = h[i:]
-	if len(h) == 0 {
-		delete(l.hits, key)
-	} else {
-		l.hits[key] = h
-	}
 	if len(l.hits) > 50000 { // sweep stale keys under heavy spraying
 		for k, v := range l.hits {
 			if len(v) == 0 || v[len(v)-1].Before(cut) {
@@ -93,19 +121,38 @@ func (l *limiter) allow(key string, max int, window time.Duration) bool {
 			}
 		}
 	}
-	return len(h) < max
+	if len(h) >= max {
+		l.hits[key] = h
+		return false
+	}
+	l.hits[key] = append(h, now)
+	return true
 }
 
-func (l *limiter) fail(key string) {
+// refund removes the most recent attempt (it succeeded, so it shouldn't count).
+func (l *limiter) refund(key string) {
 	l.mu.Lock()
-	l.hits[key] = append(l.hits[key], time.Now())
-	l.mu.Unlock()
+	defer l.mu.Unlock()
+	if h := l.hits[key]; len(h) > 0 {
+		if h = h[:len(h)-1]; len(h) == 0 {
+			delete(l.hits, key)
+		} else {
+			l.hits[key] = h
+		}
+	}
 }
 
-func (l *limiter) clear(key string) {
-	l.mu.Lock()
-	delete(l.hits, key)
-	l.mu.Unlock()
+// limitIP is the rate-limit identity of a client address: the address itself, or
+// its /64 for IPv6, since one IPv6 user can cycle through a whole /64.
+func limitIP(ip string) string {
+	p := net.ParseIP(ip)
+	if p == nil {
+		return ip
+	}
+	if p.To4() == nil {
+		return p.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	}
+	return p.String()
 }
 
 // ---- accounts and sessions ----

@@ -509,18 +509,46 @@ func (a *App) sharePWOK(r *http.Request, s Share) bool {
 	return hmacEqual(sig, a.sign(s.ID+"|"+s.pwHash+"|"+exp))
 }
 
+// Limits on guessing, per client IP and per link.
+const (
+	enumLimit     = 30 // unknown link ids per IP per 15 minutes
+	sharePWLimit  = 10 // wrong share passwords per IP per 15 minutes
+	linkPWLimit   = 50 // wrong passwords for one link per hour, from all IPs together
+	guessWindow   = 15 * time.Minute
+	linkPWWindow  = time.Hour
+	shareNoStore  = "private, no-store"
+	enumKeyPrefix = "enum:"
+)
+
 func (a *App) handleShare(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	action := r.PathValue("action")
+	// Share content is private: no proxy (Nginx Proxy Manager can cache) and no
+	// browser cache should keep a copy.
+	w.Header().Set("Cache-Control", shareNoStore)
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	// Guessing link ids (custom names are shorter than random ones) is throttled.
+	enumKey := enumKeyPrefix + limitIP(a.clientIP(r))
+	if !a.limiter.take(enumKey, enumLimit, guessWindow) {
+		a.renderShare(w, http.StatusTooManyRequests, sharePage{State: "throttled", Title: "Too many tries"})
+		return
+	}
 	s, err := a.getShare(id)
 	if err != nil {
 		a.renderShare(w, http.StatusNotFound, sharePage{State: "missing", Title: "Link not found"})
 		return
 	}
+	a.limiter.refund(enumKey) // only misses count
 	owner := a.shareOwner(s)
 	s.State = a.shareStateFor(&s, owner)
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	// A browser that was already counted for a file may keep fetching it after the
+	// limit is reached (resuming, seeking in a video).
+	resuming := s.State == "used-up" && (action == "dl" || action == "raw") && a.resumeOK(r, s, cleanRel(r.URL.Query().Get("p")))
+	if s.State != "active" && !resuming {
+		a.renderShare(w, http.StatusGone, sharePage{S: s, State: s.State, Title: s.Label})
+		return
+	}
 	if action == "qr.png" {
 		png, err := qrPNG(a.baseURL(r)+"/s/"+s.ID, atoiDef(r.URL.Query().Get("size"), 512))
 		if err != nil {
@@ -528,30 +556,30 @@ func (a *App) handleShare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "image/png")
-		w.Header().Set("Cache-Control", "private, max-age=3600")
 		_, _ = w.Write(png)
-		return
-	}
-	// A browser that started a counted download may resume it after the limit is reached.
-	resuming := s.State == "used-up" && action == "dl" && !countsAsDownload(r) && a.resumeOK(r, s, cleanRel(r.URL.Query().Get("p")))
-	if s.State != "active" && !resuming {
-		a.renderShare(w, http.StatusGone, sharePage{S: s, State: s.State, Title: s.Label})
 		return
 	}
 
 	// password gate
 	if action == "auth" && r.Method == http.MethodPost {
-		key := "share:" + a.clientIP(r)
-		if !a.limiter.allow(key, 10, 15*time.Minute) {
+		key, linkKey := "share:"+limitIP(a.clientIP(r)), "sharepw:"+s.ID
+		if !a.limiter.take(key, sharePWLimit, guessWindow) {
 			a.renderShare(w, http.StatusTooManyRequests, sharePage{S: s, Title: s.Label, State: "locked"})
 			return
 		}
+		if !a.limiter.take(linkKey, linkPWLimit, linkPWWindow) {
+			a.limiter.refund(key)
+			a.renderShare(w, http.StatusTooManyRequests, sharePage{S: s, Title: s.Label, State: "locked"})
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 		if bcrypt.CompareHashAndPassword([]byte(s.pwHash), []byte(r.FormValue("password"))) != nil {
-			a.limiter.fail(key)
 			a.logShare(r, s.ID, "password-fail", "")
 			a.renderShare(w, http.StatusUnauthorized, sharePage{S: s, Title: s.Label, NeedPW: true, PWError: true, State: "active"})
 			return
 		}
+		a.limiter.refund(key)
+		a.limiter.refund(linkKey)
 		exp := strconv.FormatInt(now()+12*3600, 10)
 		http.SetCookie(w, &http.Cookie{Name: a.pwCookieName(s.ID), Value: exp + "." + a.sign(s.ID+"|"+s.pwHash+"|"+exp), Path: "/s/" + s.ID, HttpOnly: true, Secure: a.isHTTPS(r), SameSite: http.SameSiteLaxMode, MaxAge: 12 * 3600})
 		http.Redirect(w, r, "/s/"+s.ID, http.StatusSeeOther)
@@ -584,32 +612,15 @@ func (a *App) handleShare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch action {
-	case "dl":
+	case "dl", "raw":
 		if info.IsDir() {
 			httpErr(w, 400, "use zip for folders")
 			return
 		}
-		if countsAsDownload(r) {
-			if !a.countDownload(s) {
-				a.renderShare(w, http.StatusGone, sharePage{S: s, State: "used-up", Title: s.Label})
-				return
-			}
-			a.logShare(r, s.ID, "download", strings.TrimPrefix(strings.TrimPrefix(rel, s.Path), "/"))
-			if s.MaxDL > 0 {
-				a.grantResume(w, r, s, cleanRel(sub))
-			}
-		} else if s.State != "active" && !a.resumeOK(r, s, cleanRel(sub)) {
-			a.renderShare(w, http.StatusGone, sharePage{S: s, State: s.State, Title: s.Label})
+		if !a.gateDownload(w, r, s, cleanRel(sub), action == "dl") {
 			return
 		}
-		serveFile(w, r, abs, info, true)
-		return
-	case "raw":
-		if info.IsDir() {
-			httpErr(w, 400, "folder")
-			return
-		}
-		serveFile(w, r, abs, info, false)
+		a.serveFile(w, r, abs, info, action == "dl")
 		return
 	case "thumb":
 		a.serveThumb(w, r, abs, info)
@@ -678,6 +689,35 @@ func (a *App) handleShare(w http.ResponseWriter, r *http.Request) {
 func countsAsDownload(r *http.Request) bool {
 	rg := strings.TrimSpace(r.Header.Get("Range"))
 	return rg == "" || strings.HasPrefix(rg, "bytes=0-")
+}
+
+// gateDownload decides whether a file request (download or in-browser view) uses
+// up a download, and refuses it when the limit is reached.
+//
+// On a link with a limit, each browser counts once per file: its first request
+// counts and earns a signed 6-hour resume cookie for that file, and its later
+// requests for the same file (resuming, seeking in a video, downloading after a
+// preview) are free. Every other request counts, so no Range trick and no preview
+// fetches a file without using up the limit. On a link without a limit only
+// downloads starting at byte 0 count, for the statistics.
+func (a *App) gateDownload(w http.ResponseWriter, r *http.Request, s Share, sub string, download bool) bool {
+	if s.MaxDL == 0 {
+		if download && countsAsDownload(r) {
+			a.countDownload(s)
+			a.logShare(r, s.ID, "download", sub)
+		}
+		return true
+	}
+	if a.resumeOK(r, s, sub) {
+		return true
+	}
+	if s.State != "active" || !a.countDownload(s) {
+		a.renderShare(w, http.StatusGone, sharePage{S: s, State: "used-up", Title: s.Label})
+		return false
+	}
+	a.logShare(r, s.ID, "download", sub)
+	a.grantResume(w, r, s, sub)
+	return true
 }
 
 func (a *App) resumeCookie(id string) string { return "br_" + id }
@@ -764,7 +804,7 @@ func (a *App) handleDrop(w http.ResponseWriter, r *http.Request, s Share, action
 	if action == "upload" && r.Method == http.MethodPost {
 		n, err := a.receiveUploads(w, r, s, dir, true)
 		if err != nil {
-			httpErr(w, 400, err.Error())
+			httpErr(w, uploadErrCode(err), err.Error())
 			return
 		}
 		if r.Header.Get("Accept") == "application/json" {
@@ -826,8 +866,8 @@ func createUnique(dir, name string) (*os.File, error) {
 
 // ---- file serving helpers ----
 
-func serveFile(w http.ResponseWriter, r *http.Request, abs string, info os.FileInfo, attachment bool) {
-	f, err := os.Open(abs)
+func (a *App) serveFile(w http.ResponseWriter, r *http.Request, abs string, info os.FileInfo, attachment bool) {
+	f, err := a.openNoFollow(abs)
 	if err != nil {
 		httpErr(w, 404, "not found")
 		return
@@ -846,6 +886,9 @@ func serveFile(w http.ResponseWriter, r *http.Request, abs string, info os.FileI
 	}
 	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "private")
+	}
 	disp := "inline"
 	if attachment {
 		disp = "attachment"
@@ -899,7 +942,7 @@ func (a *App) streamZipMany(w http.ResponseWriter, zipName string, srcs []zipSou
 		if err != nil {
 			return err
 		}
-		f, err := os.Open(p)
+		f, err := a.openNoFollow(p)
 		if err != nil {
 			return nil
 		}
