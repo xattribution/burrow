@@ -1,0 +1,21 @@
+# TrueNAS: Apps > Discover Apps > Custom App (three-dot menu) > Install via YAML. Paste this.
+# The app name must be lowercase letters, digits and dashes, e.g. burrow.
+# Before installing:
+#   1. user: run `id <username>` in the TrueNAS shell for the account that owns your files,
+#      and use that uid:gid, so Burrow can read what that account can read and uploads are owned by it.
+#   2. Replace the three host paths below with your own.
+#   3. Create the state and drop folders first (mkdir -p), owned by that account.
+services:
+  burrow:
+    image: ghcr.io/xattribution/burrow:latest
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "47823:47823"
+    environment:
+      TZ: UTC
+      BURROW_SCAN_HOURS: "6"
+    volumes:
+      - /mnt/pool/files:/data:ro                # everything Burrow may index; read-only
+      - /mnt/pool/files/Drop:/drop              # where uploads land; inside the library makes them searchable
+      - /mnt/pool/apps/burrow/state:/state      # database and thumbnails

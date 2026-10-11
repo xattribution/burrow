@@ -1,0 +1,15 @@
+# Generic Docker host. install.sh writes a .env next to this file.
+services:
+  burrow:
+    image: ghcr.io/xattribution/burrow:latest
+    container_name: burrow
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${PORT:-47823}:47823"
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ${LIBRARY:?set LIBRARY in .env}:/data:ro   # everything Burrow may index; read-only
+      - ${DROP:-./drop}:/drop                      # where file-drop uploads land
+      - ./state:/state                             # database, thumbnails

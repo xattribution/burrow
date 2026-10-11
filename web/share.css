@@ -1,0 +1,33 @@
+.share { max-inline-size: 920px; margin: 0 auto; padding: 32px 16px 48px; }
+.share h1 { font-size: 22px; line-height: 1.2; margin: 6px 0 10px; overflow-wrap: anywhere; }
+.share p { margin: 0 0 14px; }
+.note { white-space: pre-line; max-inline-size: 70ch; padding-inline-start: 12px; border-inline-start: 3px solid var(--rule); } /* ledger: quoted message from the sender */
+.crumbs { display: flex; flex-wrap: wrap; gap: 6px; font-size: 13px; }
+.crumbs .sep { color: var(--ink-2); }
+.preview { margin: 16px 0; }
+.preview img, .preview video { display: block; max-inline-size: 100%; max-block-size: 70vh; background: var(--surface); }
+.preview audio { inline-size: 100%; }
+.preview iframe { inline-size: 100%; block-size: 75vh; border: 1px solid var(--rule); background: var(--surface); }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.list { inline-size: 100%; border-collapse: collapse; margin-top: 8px; }
+.list th { text-align: start; font-size: 13px; color: var(--ink-2); font-weight: 700; border-bottom: 1px solid var(--rule); padding: 6px 8px; }
+.list td { padding: 6px 8px; border-bottom: 1px solid var(--rule); }
+.list .r { text-align: end; white-space: nowrap; }
+.list .name a { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; }
+.list .name a:hover { text-decoration: underline; }
+.list .th { inline-size: 28px; block-size: 28px; object-fit: cover; background: var(--surface-2); }
+.pw { display: grid; gap: 8px; max-inline-size: 320px; }
+.drop { display: grid; gap: 12px; max-inline-size: 560px; }
+.zone { display: grid; gap: 4px; padding: 28px 16px; border: 2px dashed var(--rule); text-align: center; cursor: pointer; }
+.zone.over { border-color: var(--accent); background: var(--surface); }
+.zone-main { font-weight: 700; }
+.drop input[type=file] { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; }
+.drop { position: relative; }
+.zone:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.queue { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.queue li { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; font-size: 13px; }
+.queue progress { grid-column: 1 / -1; inline-size: 100%; block-size: 6px; accent-color: var(--accent); }
+.done { color: var(--ok); font-weight: 700; }
+.foot { margin-top: 28px; font-size: 13px; }
+@media (max-width: 560px) { .hide-s { display: none; } .share { padding-top: 20px; } }
+.up-h { font-size: 17px; margin: 28px 0 10px; }

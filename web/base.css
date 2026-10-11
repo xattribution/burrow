@@ -1,0 +1,103 @@
+/*
+  Domain read (Burrow):
+  - People browsing a large NAS from a desk, sometimes a phone; recipients of links are anyone, mostly on phones.
+  - The job: find a file in seconds, then hand someone a link. The first screen is search + the library.
+  - Users read file managers fluently: Name / Size / Modified columns, breadcrumbs, folders first.
+  - File names are the data. Legibility of I/l/1 and O/0 matters more than personality: Atkinson Hyperlegible.
+  - Links have real states (active, expiring, expired, revoked, used up), so there is a status ladder.
+
+  ledger:
+  | --accent (teal)          | the one interactive color: primary buttons, selected nav, focus | rule O2, not a stock indigo |
+  | --ok / --caution / --bad | link states only: active / expiring within 24 h / expired, revoked, errors | status ladder |
+  | radius 4px on controls   | marks what is clickable; regions sit flush | O4 |
+  | mono on share ids, tokens | strings people compare character by character | required practices: type |
+*/
+@font-face { font-family: "Atkinson Hyperlegible"; src: url("/assets/atkinson-hyperlegible-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Atkinson Hyperlegible"; src: url("/assets/atkinson-hyperlegible-latin-700-normal.woff2") format("woff2"); font-weight: 700; font-display: swap; }
+
+:root {
+  color-scheme: light dark;
+  --paper: oklch(0.985 0.003 200);
+  --surface: oklch(0.955 0.005 200);
+  --surface-2: oklch(0.915 0.007 200);
+  --ink: oklch(0.22 0.01 220);
+  --ink-2: oklch(0.45 0.012 220);
+  --rule: oklch(0.86 0.008 210);
+  --accent: oklch(0.5 0.1 195);
+  --on-accent: oklch(0.99 0 0);
+  --ok: oklch(0.5 0.12 150);
+  --caution: oklch(0.55 0.13 75);
+  --bad: oklch(0.52 0.17 28);
+  --hit: oklch(0.88 0.09 95);
+  --on-hit: oklch(0.2 0.02 90);
+  --font: "Atkinson Hyperlegible", "Segoe UI", Tahoma, sans-serif; /* ledger: chosen for character legibility; fallbacks only */
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --r: 4px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: oklch(0.19 0.008 220);
+    --surface: oklch(0.225 0.009 220);
+    --surface-2: oklch(0.28 0.01 220);
+    --ink: oklch(0.93 0.005 220);
+    --ink-2: oklch(0.72 0.01 220);
+    --rule: oklch(0.33 0.01 220);
+    --accent: oklch(0.74 0.11 192);
+    --on-accent: oklch(0.17 0.02 210);
+    --ok: oklch(0.74 0.13 150);
+    --caution: oklch(0.8 0.13 80);
+    --bad: oklch(0.7 0.16 28);
+    --hit: oklch(0.45 0.08 95);
+    --on-hit: oklch(0.97 0.02 95);
+  }
+}
+:root[data-theme="dark"] {
+  --paper: oklch(0.19 0.008 220);
+  --surface: oklch(0.225 0.009 220);
+  --surface-2: oklch(0.28 0.01 220);
+  --ink: oklch(0.93 0.005 220);
+  --ink-2: oklch(0.72 0.01 220);
+  --rule: oklch(0.33 0.01 220);
+  --accent: oklch(0.74 0.11 192);
+  --on-accent: oklch(0.17 0.02 210);
+  --ok: oklch(0.74 0.13 150);
+  --caution: oklch(0.8 0.13 80);
+  --bad: oklch(0.7 0.16 28);
+  --hit: oklch(0.45 0.08 95);
+  --on-hit: oklch(0.97 0.02 95);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--paper); color: var(--ink); font: 400 15px/1.45 var(--font); -webkit-font-smoothing: antialiased; }
+a { color: var(--accent); }
+button, input, select, textarea { font: inherit; color: inherit; }
+input, select, textarea {
+  background: var(--paper); border: 1px solid var(--rule); border-radius: var(--r); padding: 6px 8px; min-height: 34px; min-width: 0;
+}
+textarea { min-height: 72px; resize: vertical; }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border: 1px solid var(--rule);
+  border-radius: var(--r); background: var(--surface); cursor: pointer; text-decoration: none; color: var(--ink); white-space: nowrap;
+}
+.btn:hover { background: var(--surface-2); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 700; }
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.danger { color: var(--bad); }
+.btn[disabled] { opacity: .55; cursor: default; }
+.mono { font-family: var(--mono); font-size: 13px; }
+.muted { color: var(--ink-2); }
+.num { font-variant-numeric: tabular-nums; }
+.err { color: var(--bad); }
+.state { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; font-size: 13px; }
+.state::before { content: ""; inline-size: 8px; block-size: 8px; background: currentColor; }
+.state.active { color: var(--ok); }
+.state.active::before { border-radius: 50%; }
+.state.expiring { color: var(--caution); }
+.state.expiring::before { clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+.state.expired, .state.revoked, .state.used-up, .state.missing, .state.unavailable { color: var(--bad); }
+.icon { inline-size: 18px; block-size: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

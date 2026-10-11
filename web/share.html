@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{{if .Title}}{{.Title}}{{else}}Shared files{{end}}</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="stylesheet" href="/assets/base.css">
+<link rel="stylesheet" href="/assets/share.css">
+</head>
+<body>
+<main class="share">
+{{if eq .State "missing"}}
+  <h1>This link doesn't exist</h1>
+  <p>It may have been typed wrong, or the file it pointed to was moved or deleted. Ask the sender for a new link.</p>
+{{else if eq .State "expired"}}
+  <h1>This link has expired</h1>
+  <p>It stopped working on {{date .S.Expires}}. Ask the sender for a new link.</p>
+{{else if eq .State "revoked"}}
+  <h1>This link was turned off</h1>
+  <p>The sender turned it off. Ask them for a new link if you still need the files.</p>
+{{else if eq .State "unavailable"}}
+  <h1>This link is no longer available</h1>
+  <p>The sender can't share these files anymore. Ask them for a new link if you still need them.</p>
+{{else if eq .State "used-up"}}
+  <h1>This link reached its download limit</h1>
+  <p>It allowed {{.S.MaxDL}} download{{if ne .S.MaxDL 1}}s{{end}}. Ask the sender for a new link.</p>
+{{else if eq .State "locked"}}
+  <h1>Too many wrong passwords</h1>
+  <p>Wait 15 minutes, then try again.</p>
+{{else if .NeedPW}}
+  <h1>{{if .Title}}{{.Title}}{{else}}Protected link{{end}}</h1>
+  <form method="post" action="/s/{{.S.ID}}/auth" class="pw">
+    <label for="pw">Password</label>
+    <input id="pw" name="password" type="password" autocomplete="current-password" required autofocus>
+    {{if .PWError}}<p class="err">That password is wrong.</p>{{end}}
+    <button class="btn primary" type="submit">Open</button>
+  </form>
+{{else if eq .S.Mode "drop"}}
+  <h1>{{.Title}}</h1>
+  {{if .S.Note}}<p class="note">{{.S.Note}}</p>{{end}}
+  {{if .Uploaded}}<p class="done">Sent {{.Uploaded}} file{{if ne .Uploaded 1}}s{{end}}.</p>{{end}}
+  <form id="drop" class="drop" method="post" action="/s/{{.S.ID}}/upload" enctype="multipart/form-data" data-max="{{.MaxUpload}}">
+    <label class="zone" for="files">
+      <span class="zone-main">Choose files or drop them here</span>
+      <span class="muted">Up to {{size .MaxUpload}} each. You won't see anything else in this folder.</span>
+    </label>
+    <input id="files" name="files" type="file" multiple>
+    <ul id="queue" class="queue"></ul>
+    <button class="btn primary" type="submit" id="send">Send files</button>
+  </form>
+{{else}}
+  <header class="head">
+    {{if .Crumbs}}
+    <nav class="crumbs" aria-label="Folder">
+      {{range $i, $c := .Crumbs}}{{if $i}}<span class="sep">/</span>{{end}}<a href="/s/{{$.S.ID}}{{if $c.Sub}}?p={{q $c.Sub}}{{end}}">{{$c.Name}}</a>{{end}}
+    </nav>
+    {{end}}
+    <h1>{{if .File}}{{.File.Name}}{{else}}{{.Title}}{{end}}</h1>
+    {{if and .S.Note (eq .Sub "")}}<p class="note">{{.S.Note}}</p>{{end}}
+  </header>
+  {{if .File}}
+    {{$p := .Sub}}
+    <div class="preview">
+      {{if eq .Preview "image"}}<img src="/s/{{.S.ID}}/raw{{if $p}}?p={{q $p}}{{end}}" alt="{{.File.Name}}">
+      {{else if eq .Preview "video"}}<video src="/s/{{.S.ID}}/raw{{if $p}}?p={{q $p}}{{end}}" controls preload="metadata" playsinline></video>
+      {{else if eq .Preview "audio"}}<audio src="/s/{{.S.ID}}/raw{{if $p}}?p={{q $p}}{{end}}" controls preload="metadata"></audio>
+      {{else if eq .Preview "pdf"}}<iframe src="/s/{{.S.ID}}/raw{{if $p}}?p={{q $p}}{{end}}" title="{{.File.Name}}"></iframe>
+      {{end}}
+    </div>
+    <p class="actions">
+      <a class="btn primary" href="/s/{{.S.ID}}/dl{{if $p}}?p={{q $p}}{{end}}">Download ({{size .File.Size}})</a>
+      <span class="muted">Modified {{date .File.Mtime}}</span>
+    </p>
+  {{else}}
+    <p class="actions">
+      <a class="btn primary" href="/s/{{.S.ID}}/zip{{if .Sub}}?p={{q .Sub}}{{end}}">Download all (.zip)</a>
+      <span class="muted">{{len .Entries}} item{{if ne (len .Entries) 1}}s{{end}}</span>
+    </p>
+    <table class="list">
+      <thead><tr><th>Name</th><th class="r">Size</th><th class="r hide-s">Modified</th></tr></thead>
+      <tbody>
+      {{range .Entries}}
+        {{$sub := join $.Sub .Name}}
+        <tr>
+          <td class="name">
+            {{if .IsDir}}<a href="/s/{{$.S.ID}}?p={{q $sub}}"><svg class="icon" viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>{{.Name}}</a>
+            {{else}}<a href="/s/{{$.S.ID}}?p={{q $sub}}">{{if eq .Kind "image"}}<img class="th" loading="lazy" src="/s/{{$.S.ID}}/thumb?p={{q $sub}}" alt="">{{else}}<svg class="icon" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>{{end}}{{.Name}}</a>{{end}}
+          </td>
+          <td class="r num">{{if not .IsDir}}{{size .Size}}{{end}}</td>
+          <td class="r num hide-s">{{date .Mtime}}</td>
+        </tr>
+      {{else}}
+        <tr><td colspan="3" class="muted">This folder is empty.</td></tr>
+      {{end}}
+      </tbody>
+    </table>
+  {{end}}
+  {{if and (eq .S.Mode "collection") .S.AllowUp (eq .Sub "")}}
+    <h2 class="up-h">Add files</h2>
+    {{if .Uploaded}}<p class="done">Sent {{.Uploaded}} file{{if ne .Uploaded 1}}s{{end}}.</p>{{end}}
+    <form id="drop" class="drop" method="post" action="/s/{{.S.ID}}/upload" enctype="multipart/form-data" data-max="{{.MaxUpload}}" data-reload="1">
+      <label class="zone" for="files">
+        <span class="zone-main">Choose files or drop them here</span>
+        <span class="muted">Up to {{size .MaxUpload}} each.</span>
+      </label>
+      <input id="files" name="files" type="file" multiple>
+      <ul id="queue" class="queue"></ul>
+      <button class="btn primary" type="submit" id="send">Send files</button>
+    </form>
+  {{end}}
+  {{if .S.Expires}}<p class="foot muted">This link works until {{date .S.Expires}}.</p>{{end}}
+{{end}}
+</main>
+<script src="/assets/share.js"></script>
+</body>
+</html>

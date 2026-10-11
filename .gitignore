@@ -1,0 +1,5 @@
+/state/
+/drop/
+*.db
+*.db-*
+/burrow
