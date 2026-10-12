@@ -356,9 +356,10 @@ func (u *User) scope(col string, p perm) (string, []any) {
 
 type ctxKey struct{}
 type authInfo struct {
-	user    *User
-	viaAPI  bool // bearer token, not a browser session
-	tokenID int64
+	user     *User
+	viaAPI   bool // bearer token or paired device, not a browser session
+	tokenID  int64
+	deviceID string // set for requests from a paired device
 }
 
 func withAuth(r *http.Request, ai authInfo) *http.Request {
@@ -390,7 +391,7 @@ func (a *App) resolveFor(u *User, p string, pm perm) (string, string, error) {
 var errReadOnly = errors.New("this folder is mounted read-only")
 
 // mountWritable asks the kernel; a read-only bind mount answers EROFS.
-func mountWritable(abs string) bool {
+var mountWritable = func(abs string) bool {
 	p := abs
 	for {
 		if _, err := os.Stat(p); err == nil {
@@ -511,6 +512,7 @@ func (a *App) apiPatchUser(w http.ResponseWriter, r *http.Request) {
 		}
 		a.dropSessions(id)
 		_, _ = a.st.exec(`DELETE FROM tokens WHERE user_id=?`, id)
+		a.revokeDevices(id)
 	}
 	if in.Admin != nil {
 		_, _ = a.st.exec(`UPDATE users SET admin=? WHERE id=?`, *in.Admin, id)
@@ -562,7 +564,7 @@ func (a *App) apiDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	// Links are turned off rather than deleted so their history stays visible to admins.
-	for _, q := range []string{`DELETE FROM grants WHERE user_id=?`, `DELETE FROM favs WHERE user_id=?`, `DELETE FROM sessions WHERE user_id=?`, `DELETE FROM tokens WHERE user_id=?`, `UPDATE shares SET revoked=1 WHERE owner_id=?`, `DELETE FROM users WHERE id=?`} {
+	for _, q := range []string{`DELETE FROM grants WHERE user_id=?`, `DELETE FROM favs WHERE user_id=?`, `DELETE FROM sessions WHERE user_id=?`, `DELETE FROM tokens WHERE user_id=?`, `DELETE FROM devices WHERE user_id=?`, `UPDATE shares SET revoked=1 WHERE owner_id=?`, `DELETE FROM users WHERE id=?`} {
 		if _, err := tx.Exec(q, id); err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -572,6 +574,7 @@ func (a *App) apiDeleteUser(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 500, err.Error())
 		return
 	}
+	a.dropDeviceSessions("", id)
 	writeJSON(w, map[string]bool{"ok": true})
 }
 

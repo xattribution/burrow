@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"log"
 	"mime"
@@ -37,6 +38,10 @@ type App struct {
 	keyMu     sync.Mutex
 	noteMu    sync.Mutex
 	noted     map[string]bool
+	certs     *certSource  // for the fingerprint phones pin
+	dev       devState     // pairing codes and device sessions
+	devMux    http.Handler // what a paired device may call, inside the channel
+	upLocks   sync.Map     // upload id -> *sync.Mutex
 }
 
 func newApp(cfg Config, st *Store) (*App, error) {
@@ -56,6 +61,7 @@ func newApp(cfg Config, st *Store) (*App, error) {
 		a.proxyNets = append(a.proxyNets, n)
 	}
 	a.idx = newIndexer(cfg, st)
+	a.devMux = a.deviceRoutes()
 	a.publicUI.Store(st.get("public_ui") == "1")
 	a.publicMCP.Store(st.get("public_mcp") == "1")
 	if !a.setupDone() {
@@ -101,6 +107,8 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
+
+func jsonEncode(w io.Writer, v any) error { return json.NewEncoder(w).Encode(v) }
 
 func readJSON(r *http.Request, v any) error {
 	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
@@ -178,40 +186,135 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/shares/{id}/items", us(a.apiRemoveItem))
 	mux.HandleFunc("POST /api/shares/{id}/upload", us(a.apiOwnerUpload))
 	mux.HandleFunc("DELETE /api/shares/{id}/uploads", us(a.apiDeleteUpload))
-	mux.HandleFunc("GET /api/shares/{id}/events", us(func(w http.ResponseWriter, r *http.Request) {
-		ev, err := a.shareEvents(userOf(r), r.PathValue("id"), atoiDef(r.URL.Query().Get("limit"), 200))
-		if err != nil {
-			httpErr(w, 404, "share not found")
-			return
-		}
-		writeJSON(w, ev)
-	}))
-	mux.HandleFunc("GET /api/events", us(func(w http.ResponseWriter, r *http.Request) {
-		ev, err := a.shareEvents(userOf(r), "", atoiDef(r.URL.Query().Get("limit"), 300))
-		if err != nil {
-			httpErr(w, 500, err.Error())
-			return
-		}
-		writeJSON(w, ev)
-	}))
-	mux.HandleFunc("GET /api/shares/{id}/qr.png", us(func(w http.ResponseWriter, r *http.Request) {
-		s, err := a.ownedShare(userOf(r), r.PathValue("id"))
-		if err != nil {
-			httpErr(w, 404, "share not found")
-			return
-		}
-		png, err := qrPNG(a.baseURL(r)+"/s/"+s.ID, atoiDef(r.URL.Query().Get("size"), 512))
-		if err != nil {
-			httpErr(w, 500, err.Error())
-			return
-		}
-		w.Header().Set("Content-Type", "image/png")
-		if r.URL.Query().Get("download") == "1" {
-			w.Header().Set("Content-Disposition", `attachment; filename="share-`+s.ID+`-qr.png"`)
-		}
-		_, _ = w.Write(png)
-	}))
+	mux.HandleFunc("GET /api/shares/{id}/events", us(a.apiShareEvents))
+	mux.HandleFunc("GET /api/events", us(a.apiEvents))
+	mux.HandleFunc("GET /api/shares/{id}/qr.png", us(a.apiShareQR))
+
+	// changing the library (write grant and a writable mount)
+	for _, rt := range a.writeRoutes() {
+		mux.HandleFunc(rt.pattern, us(rt.h))
+	}
+
+	// paired phones: pairing and the device list need a browser session
+	mux.HandleFunc("POST /api/devices/pair", ses(a.apiPairStart))
+	mux.HandleFunc("GET /api/devices/pair/{id}", ses(a.apiPairStatus))
+	mux.HandleFunc("DELETE /api/devices/pair/{id}", ses(a.apiPairCancel))
+	mux.HandleFunc("GET /api/devices", ses(a.apiDevices))
+	mux.HandleFunc("PATCH /api/devices/{id}", ses(a.apiRenameDevice))
+	mux.HandleFunc("DELETE /api/devices/{id}", ses(a.apiRevokeDevice))
+	a.channelRoutes(mux)
 	return a.secure(mux)
+}
+
+// channelRoutes are the phone channel's endpoints, on both ports. They carry
+// their own authentication (devchan.go), so the admin network list doesn't apply.
+func (a *App) channelRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/d/pair", a.handlePair)
+	mux.HandleFunc("POST /api/d/hello", a.handleHello)
+	mux.HandleFunc("POST /api/d", a.handleTunnel)
+}
+
+// deviceRoutes is what a paired device can call through the channel: the same
+// handlers the web UI uses, acting as the device's user. Account and server
+// administration stay in the web UI.
+func (a *App) deviceRoutes() http.Handler {
+	m := http.NewServeMux()
+	for _, r := range []struct {
+		pattern string
+		h       http.HandlerFunc
+	}{
+		{"GET /api/ls", a.apiLs},
+		{"GET /api/search", a.apiSearch},
+		{"GET /api/info", a.apiInfo},
+		{"GET /api/raw", a.apiRaw},
+		{"GET /api/thumb", a.apiThumb},
+		{"GET /api/zip", a.apiZip},
+		{"GET /api/changes", a.apiChanges},
+		{"GET /api/settings", a.apiGetSettings},
+		{"GET /api/favorites", a.apiFavorites},
+		{"POST /api/favorites", a.apiAddFavorite},
+		{"DELETE /api/favorites", a.apiDelFavorite},
+		{"GET /api/shares", a.apiShares},
+		{"POST /api/shares", a.apiCreateShare},
+		{"PATCH /api/shares/{id}", a.apiPatchShare},
+		{"DELETE /api/shares/{id}", a.apiDeleteShare},
+		{"GET /api/shares/{id}/items", a.apiCollection},
+		{"POST /api/shares/{id}/items", a.apiAddItems},
+		{"DELETE /api/shares/{id}/items", a.apiRemoveItem},
+		{"GET /api/shares/{id}/events", a.apiShareEvents},
+		{"GET /api/shares/{id}/qr.png", a.apiShareQR},
+		{"GET /api/device/me", a.apiDeviceMe},
+		{"PATCH /api/device/me", a.apiDeviceUpdate},
+		{"DELETE /api/device/me", a.apiDeviceUnpair},
+	} {
+		m.HandleFunc(r.pattern, r.h)
+	}
+	for _, rt := range a.writeRoutes() {
+		m.HandleFunc(rt.pattern, rt.h)
+	}
+	return m
+}
+
+type route struct {
+	pattern string
+	h       http.HandlerFunc
+}
+
+// writeRoutes change the library or read it for syncing; the web UI and paired
+// devices both use them.
+func (a *App) writeRoutes() []route {
+	return []route{
+		{"POST /api/fs/mkdir", a.apiMkdir},
+		{"POST /api/fs/move", a.apiMove},
+		{"POST /api/fs/delete", a.apiDelete},
+		{"GET /api/trash", a.apiTrash},
+		{"POST /api/trash/{id}/restore", a.apiRestore},
+		{"DELETE /api/trash/{id}", a.apiPurge},
+		{"POST /api/uploads", a.apiUploadStart},
+		{"GET /api/uploads/{id}", a.apiUploadStatus},
+		{"PUT /api/uploads/{id}", a.apiUploadChunk},
+		{"POST /api/uploads/{id}/finish", a.apiUploadFinish},
+		{"DELETE /api/uploads/{id}", a.apiUploadCancel},
+		{"GET /api/sync/list", a.apiSyncList},
+		{"GET /api/sync/changed", a.apiSyncChanged},
+		{"GET /api/sync/hash", a.apiSyncHash},
+	}
+}
+
+func (a *App) apiShareEvents(w http.ResponseWriter, r *http.Request) {
+	ev, err := a.shareEvents(userOf(r), r.PathValue("id"), atoiDef(r.URL.Query().Get("limit"), 200))
+	if err != nil {
+		httpErr(w, 404, "share not found")
+		return
+	}
+	writeJSON(w, ev)
+}
+
+func (a *App) apiEvents(w http.ResponseWriter, r *http.Request) {
+	ev, err := a.shareEvents(userOf(r), "", atoiDef(r.URL.Query().Get("limit"), 300))
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, ev)
+}
+
+func (a *App) apiShareQR(w http.ResponseWriter, r *http.Request) {
+	s, err := a.ownedShare(userOf(r), r.PathValue("id"))
+	if err != nil {
+		httpErr(w, 404, "share not found")
+		return
+	}
+	png, err := qrPNG(a.baseURL(r)+"/s/"+s.ID, atoiDef(r.URL.Query().Get("size"), 512))
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	if r.URL.Query().Get("download") == "1" {
+		w.Header().Set("Content-Disposition", `attachment; filename="share-`+s.ID+`-qr.png"`)
+	}
+	_, _ = w.Write(png)
 }
 
 // secure adds baseline headers and an optional admin IP allow-list.
@@ -219,7 +322,8 @@ func (a *App) secure(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		baseHeaders(w, r)
 		p := r.URL.Path
-		public := strings.HasPrefix(p, "/s/") || p == "/healthz" || strings.HasPrefix(p, "/assets/") || p == "/favicon.svg"
+		public := strings.HasPrefix(p, "/s/") || p == "/healthz" || strings.HasPrefix(p, "/assets/") || p == "/favicon.svg" ||
+			p == "/api/d" || strings.HasPrefix(p, "/api/d/")
 		if !public && !a.adminAllowed(r) {
 			http.Error(w, "not available from this network", http.StatusForbidden)
 			return
@@ -242,7 +346,8 @@ func baseHeaders(w http.ResponseWriter, r *http.Request) {
 }
 
 // publicRoutes is what the public port serves: share links and the few assets
-// their pages use. The web UI with its API, and MCP, are only added when an admin
+// their pages use, and the phone channel (/api/d, which authenticates and
+// encrypts every request itself). The web UI with its API, and MCP, are only added when an admin
 // turns them on (Settings > Public port); everything else is 404, so the admin
 // side isn't reachable from the internet at all by default.
 func (a *App) publicRoutes() http.Handler {
@@ -261,7 +366,8 @@ func (a *App) publicRoutes() http.Handler {
 		r.SetPathValue("file", "favicon.svg")
 		a.handleAsset(w, r)
 	})
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	a.channelRoutes(pub) // the phone app, end-to-end encrypted
+	return markPublic(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		if a.publicUI.Load() || (p == "/mcp" && a.publicMCP.Load()) {
 			full.ServeHTTP(w, r)
@@ -269,7 +375,7 @@ func (a *App) publicRoutes() http.Handler {
 		}
 		baseHeaders(w, r)
 		pub.ServeHTTP(w, r)
-	})
+	}))
 }
 
 // publicAssets are the files share pages load; the admin UI's code isn't among them.
@@ -573,7 +679,11 @@ func (a *App) apiLs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := cleanRel(r.URL.Query().Get("path"))
-	writeJSON(w, map[string]any{"path": p, "entries": es, "can_share": p != "" && userOf(r).can(p, permShare)})
+	canWrite := false
+	if abs, _, err := a.resolve(p); err == nil && p != "" {
+		canWrite = userOf(r).can(p, permWrite) && mountWritable(abs)
+	}
+	writeJSON(w, map[string]any{"path": p, "entries": es, "can_share": p != "" && userOf(r).can(p, permShare), "can_write": canWrite})
 }
 
 func (a *App) apiSearch(w http.ResponseWriter, r *http.Request) {
@@ -613,7 +723,8 @@ func (a *App) apiInfo(w http.ResponseWriter, r *http.Request) {
 	a.decorate(u, es)
 	shares, _ := a.listShares(r, u, rel, false)
 	canRead := u.can(rel, permRead)
-	out := map[string]any{"entry": es[0], "shares": shares, "can_read": canRead, "can_share": u.can(rel, permShare)}
+	canChange := strings.Contains(rel, "/") && u.can(rel, permWrite) && mountWritable(filepath.Dir(abs)) && (!e.IsDir || u.canWriteTree(rel))
+	out := map[string]any{"entry": es[0], "shares": shares, "can_read": canRead, "can_share": u.can(rel, permShare), "can_change": canChange}
 	if canRead {
 		out["preview"] = previewKind(e)
 	}
@@ -749,6 +860,7 @@ type Settings struct {
 	TwoFactor          bool       `json:"two_factor"`
 	RecoveryLeft       int        `json:"recovery_left"`
 	PublicURL          string     `json:"public_url"`
+	LanURL             string     `json:"lan_url"`
 	DefaultExpiryHours float64    `json:"default_expiry_hours"`
 	MaxUploadMB        int64      `json:"max_upload_mb"`
 	Roots              []rootInfo `json:"roots"`
@@ -778,6 +890,7 @@ func (a *App) currentSettings(u *User) Settings {
 		out.Roots, out.Excludes, out.AdminCIDRs = a.availableRoots(), ex, a.st.get("admin_cidrs")
 		out.DataDir, out.DropDir, out.ScanHours = a.cfg.DataDir, a.cfg.DropDir, a.cfg.ScanInterval.Hours()
 		out.PublicUI, out.PublicMCP, out.PublicAddr = a.publicUI.Load(), a.publicMCP.Load(), a.cfg.PublicAddr
+		out.LanURL = a.st.get("lan_url")
 	}
 	return out
 }
@@ -789,6 +902,7 @@ func (a *App) apiGetSettings(w http.ResponseWriter, r *http.Request) {
 func (a *App) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		PublicURL          *string   `json:"public_url"`
+		LanURL             *string   `json:"lan_url"`
 		PublicUI           *bool     `json:"public_ui"`
 		PublicMCP          *bool     `json:"public_mcp"`
 		Roots              *[]string `json:"roots"`
@@ -803,11 +917,18 @@ func (a *App) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	rescan := false
 	// check everything that can be refused before changing anything
-	var pubURL string
+	var pubURL, lanURL string
 	if in.PublicURL != nil {
 		var err error
 		if pubURL, err = normalizeURL(*in.PublicURL); err != nil {
 			httpErr(w, 400, err.Error())
+			return
+		}
+	}
+	if in.LanURL != nil {
+		var err error
+		if lanURL, err = normalizeURL(*in.LanURL); err != nil {
+			httpErr(w, 400, strings.Replace(err.Error(), "public address", "home address for phones", 1))
 			return
 		}
 	}
@@ -824,6 +945,9 @@ func (a *App) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.PublicURL != nil {
 		a.st.set("public_url", pubURL)
+	}
+	if in.LanURL != nil {
+		a.st.set("lan_url", lanURL)
 	}
 	setFlag := func(key string, v *bool, f *atomic.Bool) {
 		if v != nil {

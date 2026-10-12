@@ -152,11 +152,12 @@ func main() {
 			}
 			_, _ = s.exec(`UPDATE users SET totp_secret='', totp_pending='', totp_last=0, totp_recovery='[]' WHERE id=?`, u.ID)
 			_, _ = s.exec(`DELETE FROM tokens WHERE user_id=?`, u.ID)
+			_, _ = s.exec(`DELETE FROM devices WHERE user_id=?`, u.ID)
 			a.dropSessions(u.ID)
 			if makeAdmin {
 				_, _ = s.exec(`UPDATE users SET admin=1, disabled=0 WHERE id=?`, u.ID)
 			}
-			println("Temporary password for " + u.Name + ": " + tmp + "\nSign in and change it under Settings. Two-factor sign-in was turned off and API tokens were revoked for this user.")
+			println("Temporary password for " + u.Name + ": " + tmp + "\nSign in and change it under Settings. Two-factor sign-in was turned off, and API tokens and paired phones were revoked for this user.")
 			if a.adminCount() == 0 {
 				println("There is no active admin. Run this again with --admin to make " + u.Name + " one.")
 			} else if u.Disabled && !makeAdmin {
@@ -183,6 +184,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	app.certs = certs
 	tcfg := tlsConfig(certs, cfg.PQOnly)
 	if c, _ := certs.get(nil); c != nil {
 		src := "self-signed, " + certs.certFile
@@ -239,13 +241,14 @@ func main() {
 	st.db.Close()
 }
 
-// maintain runs daily housekeeping: leftovers from interrupted uploads and thumbnails
-// nobody has looked at in 90 days.
+// maintain runs daily housekeeping: leftovers from interrupted uploads, the trash
+// after 30 days, and thumbnails nobody has looked at in 90 days.
 func (a *App) maintain(ctx context.Context) {
 	t := time.NewTicker(24 * time.Hour)
 	defer t.Stop()
 	for {
 		a.cleanPartials()
+		a.purgeTrash()
 		a.pruneThumbs(90 * 24 * time.Hour)
 		select {
 		case <-ctx.Done():

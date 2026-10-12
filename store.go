@@ -105,6 +105,9 @@ func openStore(path string) (*Store, error) {
 	if err := migrateUsers(db); err != nil {
 		return nil, err
 	}
+	if _, err := db.Exec(deviceSchema + writeSchema); err != nil {
+		return nil, err
+	}
 	// the database holds password hashes, 2FA secrets and the key that signs share
 	// cookies: readable by Burrow's user only
 	for _, f := range []string{path, path + "-wal", path + "-shm"} {
