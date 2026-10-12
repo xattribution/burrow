@@ -72,11 +72,45 @@ jobs:
             android/shared/build/reports
           retention-days: 14
 
+  # The app on a real Android (an emulator): the device key in the Keystore, a
+  # photo backup from the media library, background sync through WorkManager,
+  # and the R8-shrunk release build paired and browsed through its own screens.
+  android-device:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { cache-read-only: true }
+      - name: Android SDK
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.2" "build-tools;37.0.0" > /dev/null
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Build the app, its device tests and the release build
+        working-directory: android
+        run: ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease
+      - name: Start Burrow
+        run: android/ci/server.sh
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash android/ci/device-tests.sh
+
   # A version tag (v1.2.3) builds the APK signed with the release key, which
   # only exists in the "release" environment (limited to v* tags), and
   # attaches it to a GitHub release.
   apk:
-    needs: [test, android]
+    needs: [test, android, android-device]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: release

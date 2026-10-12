@@ -1,6 +1,6 @@
 # Burrow
 
-Burrow indexes a NAS for instant search and turns any file or folder into a share link. Links can have an expiry, a password, a download limit and a QR code. It also keeps a log of every file change and every link visit. One Go binary, one SQLite file, and an MCP endpoint for LLM clients.
+Burrow indexes a NAS for instant search and turns any file or folder into a share link. Links can have an expiry, a password, a download limit and a QR code. It also keeps a log of every file change and every link visit. One Go binary, one SQLite file, an MCP endpoint for LLM clients, and an Android app that browses, shares, backs up and syncs, at home and away, end-to-end encrypted.
 
 ## Quick start
 
@@ -37,7 +37,9 @@ The backup holds settings, users, links, link history, API tokens and the change
 - **Shared folders** are one link whose contents you keep changing. Add any file or folder from the library to it, and admins can also upload new files straight into it. Library items are linked live, not copied. The link, password and history stay the same, so the recipient just reopens it to see what's new. Admins can optionally let recipients add files too. Turn it off or let it expire when you're done, and deleting it can also delete its uploads.
 - **File drops** (admins only) are upload-only links, like Nextcloud's file drop. Someone can send you files without seeing anything on the NAS. Uploads land in `/drop/<name>`, and duplicate names are renamed rather than overwritten.
 - **Nothing is copied.** A link or shared folder is a database row that points at library paths. A drop's or shared folder's upload folder is only created when the first file arrives, so making links never adds folders to your NAS.
-- **Users** each get their own sign-in, two-factor, favorites, links and API tokens. Admins see everything. Everyone else sees only the folders an admin grants them: **View**, **View and share**, or **No access** to carve a subfolder out of a folder they can see. Search, previews, zips, the change log, the overview and links all follow those grants. A link stops working if its owner loses share access or the account is turned off.
+- **Users** each get their own sign-in, two-factor, favorites, links, API tokens and phones. Admins see everything. Everyone else sees only the folders an admin grants them: **View**, **View and share**, **View and edit**, **View, edit and share**, or **No access** to carve a subfolder out of a folder they can see. Search, previews, zips, the change log, the overview, links and the phone app all follow those grants. A link stops working if its owner loses share access or the account is turned off.
+- **Writable folders** take uploads, new folders, renames, moves and deletes, from the web UI and the phone app, where a user has edit access and the folder is [mounted writable](#writable-folders). Moving a folder takes its permissions and links along. Deleting moves things to a trash that keeps them 30 days (**Recently deleted**).
+- **Phone app** for Android: browse and search, preview, share links, save to the phone, and back up or sync folders both ways in the background. See [Phone app](#phone-app).
 - **Activity** has two logs. One records files added, modified and deleted, kept for 180 days. The other records every link open, download, upload and wrong password, with the visitor's IP. Each user sees changes in their folders and activity on their own links.
 - **Overview** charts size by library, size by file type and changes per day, counting only what you can see.
 - **Favorites** pin files and folders to your sidebar.
@@ -66,9 +68,9 @@ Burrow listens on two ports, both HTTPS only:
 | Port | Serves | Expose it? |
 |---|---|---|
 | 47823 | the whole app: web UI, API, MCP, share links | No. Keep it on your LAN |
-| 47824 | share links only, plus the few files their pages load | Yes, through your reverse proxy |
+| 47824 | share links (plus the few files their pages load) and the phone app | Yes, through your reverse proxy |
 
-Everything else answers 404 on 47824: the web UI, the API, sign-in, setup, MCP and the health check. **Settings → Public port** can add the web UI or MCP to it, and both are off by default.
+Everything else answers 404 on 47824: the web UI, the API, sign-in, setup, MCP and the health check. The phone app's requests all go to one path, `/api/d`, sealed end to end (see [How the phone connects](#how-the-phone-connects)). **Settings → Public port** can add the web UI or MCP to it, and both are off by default.
 
 Nothing travels in plain text on any hop. Burrow terminates TLS 1.3 itself, preferring the hybrid post-quantum key exchange (X25519MLKEM768), so the hop from the proxy to Burrow is encrypted too. Plain HTTP on either port only ever gets a redirect to HTTPS (or, from a proxy, an error), never content. Pick one of these two Nginx Proxy Manager setups.
 
@@ -114,6 +116,52 @@ It reports the certificate, the TLS version and key exchange, whether plain HTTP
 
 For the strictest setup, `BURROW_TLS_PQ_ONLY=true` refuses clients without post-quantum key exchange. Older browsers and phones then can't open links at all, so it's off by default.
 
+## Phone app
+
+The Android app reaches Burrow at home and away. Download the APK from [Releases](https://github.com/xattribution/burrow/releases/latest) on the phone and open it to install. Updates install over it.
+
+**Pair it:** in Burrow's web UI open **Settings → Phones → Pair a phone**, then in the app tap **Scan the code**. The code works once and expires after 10 minutes. It carries two addresses: the public address (**Settings → Public address**) and the home address (**Settings → Home address for phones**, or the address your browser used). On Wi-Fi the app tries the home address first, and the public one everywhere else.
+
+What it does:
+
+- **Files:** browse and search everything your account can see. Photos zoom, video and audio stream (with seeking), text and PDFs preview. Save anything to the phone's Downloads or open it in another app. Where you may edit: upload, new folder, rename, delete.
+- **Links:** make a link with an expiry, password and download limit, copy or share it, show its QR code, turn it off.
+- **Sync and backup**, per folder pair:
+
+  | Mode | What happens |
+  |---|---|
+  | Back up to Burrow | New and changed files go to Burrow. Deleting on the phone deletes nothing on Burrow. |
+  | Keep in sync both ways | Additions, changes and deletes go both ways. |
+  | Keep a copy on this phone | The Burrow folder is copied to the phone and kept up to date. |
+
+  **Photos and videos** backs up the whole camera roll, with photo locations kept, a minute or two after each new photo. Every pair also runs hourly, only on Wi-Fi or only while charging if you like. When a file changed on both sides, both versions are kept. Files deleted from Burrow wait 30 days in its trash. Large uploads resume where they stopped, and each one is checked end to end with SHA-256.
+- **Save to Burrow** from any app's share menu, and drag files in from another app on a foldable or in split screen.
+- **Built for phones and foldables:** one pane at a time on a phone or a folded foldable; the list and the open file side by side when it's unfolded (kept clear of the hinge) or on a tablet. Half-folded on a table, a photo or video takes the top half and the details the bottom.
+
+### How the phone connects
+
+- **End to end:** every request the app makes is encrypted a second time, inside HTTPS, with keys only the phone and Burrow hold. A reverse proxy (Nginx Proxy Manager included) sees one URL and scrambled bytes: no file names, paths, contents or credentials. This works with either setup above; nothing extra to configure.
+- **Post-quantum:** keys come from ML-KEM-768 and X25519 together, mixed with a secret that only ever travels inside the QR code, and are renewed every hour. Requests are sealed with AES-256-GCM and each one is accepted once.
+- **Nothing to steal:** no password or reusable token ever crosses the network. A server that isn't your Burrow can't complete the handshake, so the app won't talk to it, even on a Wi-Fi network that copies your home address.
+- **Removal:** paired phones are listed under **Settings → Phones** (and per user under **Users**). Removing one cuts it off at once; resetting a user's password removes their phones too.
+- **On the phone:** the key is sealed by the Android Keystore and excluded from backups and phone-to-phone transfers. A new phone is paired again.
+
+### Checking a download
+
+Each release lists the APK's SHA-256 and the SHA-256 of the certificate it is signed with; every release uses the same certificate. To check by hand: `apksigner verify --print-certs burrow-v1.0.0.apk`.
+
+### Writable folders
+
+Burrow, the web UI and the phone app write only where both are true: the user has **View and edit** on the folder (**Users → Folder access**), and the folder is mounted writable into the container. Keep the library read-only and mount the folders you want writable on top of it:
+
+```yaml
+volumes:
+  - /mnt/pool/files:/data:ro                  # the library, read-only
+  - /mnt/pool/files/Photos:/data/Photos       # writable: phone backups land here
+```
+
+The container's user needs write permission on that folder. Deleted files move to a hidden `.burrow-trash` folder on the same mount and are removed after 30 days.
+
 ## Connecting an LLM
 
 Create a token in **Settings → MCP and API tokens**. Burrow shows the token once, together with a ready-made client config:
@@ -155,7 +203,8 @@ Folders named `.zfs`, `@eaDir`, `#recycle`, `.Trash-*`, `$RECYCLE.BIN` and a few
 
 - **Transport:** HTTPS only, TLS 1.3 only, hybrid post-quantum key exchange preferred, HSTS. Plain HTTP is answered with a redirect or an error and nothing else.
 - **Exposure:** the public port serves share links and nothing else unless you add the web UI or MCP to it.
-- **Files:** the library is mounted read-only. Only `/drop` and `/state` are writable.
+- **Files:** the library is mounted read-only, except folders you mount writable on purpose. Writing also needs an edit grant, and a user can't move or delete a folder holding something they may not change.
+- **Phones:** end-to-end encrypted inside HTTPS with post-quantum hybrid keys (ML-KEM-768 + X25519 + the QR code's secret), AES-256-GCM, one-time message numbers; no reusable credential is ever sent. See [How the phone connects](#how-the-phone-connects).
 - **Paths:** every path is checked against the enabled libraries and hidden names, must be spelled exactly as on disk (so case tricks don't work on case-insensitive datasets), and is opened without following symlinks, even one swapped in after the check.
 - **Permissions:** every request runs as a user and is checked against that user's folder grants. Share links run with their owner's share permission, so a recipient never sees more than the owner could share.
 - **Link ids:** 12 random characters (about 70 bits). Custom names are easier to guess, so add a password when you use one. More than 30 unknown link ids from one address in 15 minutes blocks that address for 15 minutes.
@@ -182,5 +231,15 @@ Folders named `.zfs`, `@eaDir`, `#recycle`, `.Trash-*`, `$RECYCLE.BIN` and a few
 
 ```bash
 go test ./...
-BURROW_DATA=./testdata BURROW_STATE=./state BURROW_DROP=./drop go run .
+BURROW_DATA=./testdata BURROW_STATE=./state BURROW_DROP=./drop go run .   # then https://localhost:47823
 ```
+
+The phone app is in `android/`: a Kotlin Multiplatform core (`shared`: the encrypted channel, API client and sync engine) and the Jetpack Compose app (`app`). Its tests start the Go server and talk to it for real.
+
+```bash
+cd android
+./gradlew :shared:jvmTest :app:testDebugUnitTest   # protocol, sync and UI tests, with screenshots
+./gradlew :app:assembleDebug                       # app/build/outputs/apk/debug/app-debug.apk
+```
+
+Pushing a `v*` tag builds the release APK, signed with the key stored in the repository's `release` environment, and attaches it to a GitHub release.

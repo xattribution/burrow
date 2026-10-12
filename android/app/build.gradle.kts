@@ -22,6 +22,7 @@ android {
         versionName = versionTag
         versionCode = versionParts[0] * 1_000_000 + versionParts[1] * 1_000 + versionParts[2]
         vectorDrawables.useSupportLibrary = true
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -122,4 +123,10 @@ dependencies {
     testImplementation(libs.coroutines.test)
     testImplementation(libs.sqldelight.jvm)
     testImplementation(libs.work.testing)
+
+    androidTestImplementation(libs.test.runner)
+    androidTestImplementation(libs.test.rules)
+    androidTestImplementation(libs.test.core)
+    androidTestImplementation(libs.test.ext.junit)
+    androidTestImplementation(libs.coroutines.test)
 }

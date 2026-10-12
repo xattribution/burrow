@@ -42,9 +42,14 @@ collections.go   "shared folders": one link with editable contents
 totp.go          two-factor sign-in (TOTP + recovery codes)
 thumbs.go        image thumbnails with EXIF orientation and cache
 mcp.go           Model Context Protocol endpoint (JSON-RPC over HTTP)
-burrow_test.go   integration tests through real HTTP (httptest)
-users_test.go    tests for every permission rule, link ownership, the upgrade, lazy upload folders, thumbnails, MCP
+tls.go           TLS 1.3 on every port, certificates, plain-HTTP handling
+verify.go        `burrow verify-public`: checks a deployment from outside
+devchan.go       the phone channel's cryptography: handshakes, sealed segments
+devices.go       pairing, paired devices, the channel endpoints and the tunnel
+writes.go        new folders, moves, delete to trash, resumable uploads, sync listings
+*_test.go        integration tests through real HTTP (httptest): permissions, security, devices, writes
 web/             embedded UI: index.html, app.js, app.css, base.css, share.html, share.js, share.css, fonts, favicon
+android/         the phone app: shared/ (Kotlin Multiplatform core) and app/ (Jetpack Compose); see section 16
 deploy/truenas-app.yaml   TrueNAS "Install via YAML" template
 compose.yaml, install.sh, Dockerfile, .github/workflows/release.yml
 ```
@@ -60,7 +65,7 @@ compose.yaml, install.sh, Dockerfile, .github/workflows/release.yml
 | **Go, not Rust** | The workload is disk-bound: walking ZFS metadata, SQLite queries, streaming files. Rust's speed edge wouldn't be visible. Go builds faster and has an excellent standard HTTP server and simple concurrency, which makes iterating faster. Rust would only save about 25 MB of RAM, which doesn't matter on a NAS. |
 | **SQLite through `modernc.org/sqlite` (pure Go, no cgo)** | It makes a static binary and a tiny container (34 MB image). WAL mode. One Go mutex serializes writers (`Store.wmu`) instead of retrying on SQLITE_BUSY. |
 | **FTS5 with the `trigram` tokenizer** on the full path | It gives substring search ("tax" matches "2024-taxes.pdf" and folder names) in milliseconds. Terms under 3 characters fall back to `LIKE`. |
-| **Library mounted read-only into the container** | The kernel guarantees Burrow can't modify or delete library files, whatever bugs it has. Only `/drop` (uploads) and `/state` (database, thumbnails) are writable. |
+| **Library mounted read-only into the container** | The kernel guarantees Burrow can't modify or delete library files, whatever bugs it has. Only `/drop` (uploads), `/state` (database, thumbnails) and folders deliberately mounted writable on top of the library can change. |
 | **Browsing reads the disk directly; search reads the index** | Folder listings are never stale. Search is instant. Browsing a folder also queues a quick rescan of it, so the index heals itself. |
 | **Vanilla JS UI, no framework or build step** | Small, fast and dependency-free. All app state is kept in the URL query (`?view=&path=&q=&sel=&share=&tab=…`), so the back button and links work. |
 | **Share links over HTTPS, not FTP** | FTP sends passwords in clear text, needs extra ports that reverse proxies can't pass, and needs client apps. An HTTPS link works in any browser. |
@@ -81,7 +86,7 @@ Environment variables cover plumbing only. Everything a user changes lives in th
 | `BURROW_WATCH` | `true` | inotify live updates |
 | `BURROW_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` | peers allowed to set X-Forwarded-For; the reverse proxy's address must be added |
 
-Settings keys: `public_url` (must be https), `public_ui` and `public_mcp` (add the web UI or MCP to the public port), `roots` (JSON list of enabled top-level folders), `excludes` (newline globs), `default_expiry_hours` (default 168), `max_upload_mb` (default 20480), `admin_cidrs`, `secret` (HMAC key, generated), `setup_done`, `initial_scan_done`. Versions before multi-user kept the one admin account in `admin_user`, `admin_hash` and the `totp_*` keys. The upgrade moves that account into the `users` table as user 1 and deletes those keys.
+Settings keys: `public_url` (must be https), `lan_url` (the home address phones are given; must be https), `public_ui` and `public_mcp` (add the web UI or MCP to the public port), `roots` (JSON list of enabled top-level folders), `excludes` (newline globs), `default_expiry_hours` (default 168), `max_upload_mb` (default 20480), `admin_cidrs`, `secret` (HMAC key, generated), `setup_done`, `initial_scan_done`. Versions before multi-user kept the one admin account in `admin_user`, `admin_hash` and the `totp_*` keys. The upgrade moves that account into the `users` table as user 1 and deletes those keys.
 
 ---
 
@@ -101,6 +106,10 @@ Settings keys: `public_url` (must be https), `public_ui` and `public_mcp` (add t
 | `share_items(share_id, path, added)` | contents of collections (shared folders) |
 | `share_events(id, share_id, ts, kind, ip, ua, detail)` | link activity: view, download, zip, upload, password-fail. Pruned after 1 year |
 | `favs(user_id, path, created)` | sidebar pins, per user. Replaced the single-user `favorites` table, which the upgrade copies and drops |
+| `devices(id, user_id, name, platform, model, app_version, key, created, last_seen, last_ip, last_via)` | paired phones. `key` is the 32-byte device key the channel is built on (the database file is mode 0600) |
+| `trash(id, user_id, path, stored, is_dir, size, deleted)` | what was deleted, where it waits (`<mount>/.burrow-trash/<id>/<name>`), kept 30 days |
+| `uploads(id, user_id, dir, name, size, mtime, sha256, conflict, expect_size, expect_mtime, off, state, created, updated)` | resumable uploads in progress. `state` is the SHA-256 state at `off`, so a resumed upload is still checked end to end. Dropped after 7 days untouched |
+| `file_hashes(path, size, mtime, sha256)` | SHA-256 cache, valid while size and mtime (ms) match |
 
 Migrations are idempotent `ALTER TABLE … ADD COLUMN` statements whose "duplicate column" errors are ignored.
 
@@ -383,12 +392,12 @@ The rules, as numbered in the CSS comments:
 - **Browser run:** the real binary on a sample library, driven with Playwright as an admin and as a restricted user. 21 checks covered setup, user creation, carve-outs, view-only files, sharing, search, settings, a link stopping when its owner loses access, and the phone layout. 7 more covered public drop uploads, admin uploads into a shared folder, folders appearing only on first upload, and no partial files left. No page or console errors.
 
 ### Known limits and remaining risks
-1. **Admin access list** (`admin_cidrs`) blocks the whole LAN-port API from outside the list, tokens included. The phone app's device API will live on the public port (section 16).
+1. **Admin access list** (`admin_cidrs`) blocks the whole LAN-port API from outside the list, tokens included. Paired phones use the channel, which is outside it (section 16).
 2. **Rate limits** are in memory and reset on restart. The per-account sign-in limit (30 per hour) means someone who knows a username can keep that account from signing in for an hour; that is the price of stopping guesses spread over many addresses.
 3. **Custom link names** are guessable. The UI suggests a password with them, and guessing is throttled.
 4. **TCP stream mode** hides visitors' addresses from Burrow, so guessing limits are shared by everyone behind the proxy.
 5. **Typing `http://` by hand** sends that first request's URL in plain text before the redirect (nothing is served). HSTS prevents it on later visits.
-6. **Grants follow paths.** Renaming a carved-out folder moves it out from under its No-access grant.
+6. **Grants follow paths.** Moves made in Burrow take grants along; renaming a carved-out folder on the NAS directly moves it out from under its No-access grant.
 7. **Drop folder inside the library** is visible to anyone with access to its parent (section 12).
 8. **Very broad searches** that match most of the index are slower (see below), because results are ranked and the total is counted up to 10,000. Specific searches stay around 15 ms.
 9. **Thumbnail memory:** up to 3 decodes at once, each capped at 60 MP (about 240 MB), so roughly 720 MB at the worst moment.
@@ -416,40 +425,59 @@ The per-user filter adds nothing measurable. The broad-query cost was already th
 
 ---
 
-## 16. Phone app (planned) and the server work it needs
+## 16. Phone app (`android/`, `devchan.go`, `devices.go`, `writes.go`)
 
-### Decisions
-- **Native, with Kotlin Multiplatform.** A shared module holds the API client, the sync engine and address switching. The Android screens use Jetpack Compose and come first. A separate SwiftUI iPhone app comes later and reuses the shared module.
-- **Each folder pair** can be set to **one-way backup** or **two-way sync**.
-- **Access follows the signed-in user**: the per-folder grants above.
-- **Local vs. public address:** on Wi-Fi networks marked as home, the app uses the LAN address, and the public address everywhere else. Android needs location permission to read the Wi-Fi name.
-- **The app should:** browse the NAS, open other people's share links, drag and drop between phone and NAS, back up and sync, and show phone files alongside NAS files.
-- **Open question:** browsing a photo server such as Immich inside the app, either directly or passed through Burrow.
+### Structure
+- **`android/shared`**, Kotlin Multiplatform (JVM target today): the channel client (`Protocol.kt`, `Channel.kt`), the typed API (`Api.kt`), resumable uploads (`Transfers.kt`), the sync engine (`Sync.kt`) and its SQLDelight state. Platform pieces sit behind `expect`: `Crypto` (BouncyCastle ML-KEM and X25519, the JCA for AES-GCM and HMAC) and the OkHttp `Transport`. An iPhone app adds iOS targets with CryptoKit and URLSession versions of those two.
+- **`android/app`**, Jetpack Compose with Material 3. `NavigationSuiteScaffold` picks a bottom bar or a rail by window size; Files and Sync use `NavigableListDetailPaneScaffold`, so a phone or folded foldable shows one pane and an unfolded foldable or tablet shows two, avoiding the hinge. In tabletop posture a photo or video takes the top half. The activity handles size changes itself, so folding never rebuilds the screen.
 
-### Server design (planned, not built)
-1. **Writable folders.** The library stays mounted read-only, and specific folders are mounted writable on top. Writing needs both a write grant and a writable mount (`mountWritable` asks the kernel). Then add write to the grants UI, plus move, new folder and delete-to-trash.
-2. **Pairing.** A short-lived, single-use code shown as a QR in web Settings. The app trades it for a **device token** tied to the user, and each device can be revoked. Schema to add: `pair_codes(code_hash, user_id, expires)`, plus `tokens.kind` (`api` | `device`) and `tokens.platform`.
-3. **Server identity check.** Before sending its token over the LAN, the app sends a random challenge, and the server answers with an HMAC keyed by the token's hash. That way the token is never sent to a fake server on a Wi-Fi network with a lookalike name.
-4. **Uploads.** Resumable chunked uploads to a hidden partial file (the same `.burrow-part-` pattern), renamed into place when complete. Name conflicts: keep both, overwrite or skip. Schema: `uploads(id, user_id, dir, name, size, off, sha256, mtime, conflict, created)`.
-5. **Deletes** go to a hidden trash folder and are kept 30 days.
-6. **Sync API:** a folder listing, a change feed with a cursor (`changes.id` already increases monotonically), and cached SHA-256 hashes, `file_hashes(path, size, mtime, sha256)`.
-7. **Where the app connects:** the device API goes on the public port, next to share links, gated by device tokens, so the app works away from home while the web UI stays private.
+### Pairing and the channel
+Section 8a covers TLS. The phone channel adds end-to-end encryption on top of it, because TLS ends at a reverse proxy, which then sees everything, and its key exchange may not be post-quantum.
 
-These tables and columns are not in the schema yet; it only holds what is built.
+1. **Pairing.** The web UI makes a one-time code (16-byte id, 32-byte secret `Kqr`, 10 minutes, at most 3 open per user, kept in memory only) and shows it as `burrow://pair?v=1&c=…&k=…&lan=…&pub=…&pin=…`. The app sends an ML-KEM-768 encapsulation key and an X25519 key, MACed with a key derived from `Kqr`; its name and model are sealed under `Kqr` too. Burrow consumes the code on the first correct MAC, encapsulates, and both derive the device key `DK` with HKDF over `Kqr ‖ ss_mlkem ‖ ss_x25519`, salted with the transcript hash. Someone who photographed the code and recorded the traffic still has to break ML-KEM and X25519.
+2. **Sessions.** `POST /api/d/hello` runs the same exchange authenticated by `DK` (a MAC over the request). The session key mixes `DK` with fresh ML-KEM and X25519 secrets, so recorded traffic stays secret if `DK` leaks later. Only a holder of `DK` can produce a reply the app can open: that is the server identity check, and no password or token is ever sent. Sessions last an hour, live in memory (8 per device, oldest dropped), and a restart only costs a new handshake.
+3. **Requests.** `POST /api/d`: a 25-byte header (version, session id, message number), then the real request (method, path, headers, body) in AES-256-GCM segments of 64 KiB under a key derived from the session key and message number. The last segment is flagged in its nonce, so truncation is detected; segments can't be reordered or moved between messages. Message numbers are accepted once (4096-message window). The reply comes back the same way. Inside, the request runs as the device's user through `deviceRoutes()`, an allowlist of the normal handlers: browsing, search, files, thumbnails, links, favorites, writes, uploads and sync. Account and server administration stay in the web UI.
+4. **Both ports, past the admin list.** `/api/d/*` is on the LAN and public ports and outside `admin_cidrs`, since it authenticates every request itself. Every request also checks that the device still exists and its user is active, so removing a phone (or `reset-password` from the CLI, another process) takes effect at once.
 
----
+The byte layouts are in the comment at the top of `devchan.go`. `devices_test.go` has a reference client in Go and `android/shared`'s interop tests run the Kotlin client against the real server, so the two can't drift apart.
+
+### Addresses
+The QR code carries the home address (`lan_url`, or the address the browser used unless that is loopback or the public address) and the public address, plus the SHA-256 of Burrow's certificate. The app trusts publicly trusted certificates as usual and Burrow's self-signed one only by that pin; the hello reply refreshes addresses and pins. On Wi-Fi or Ethernet it tries home first, elsewhere public first (home only as a fallback behind a VPN). Trying the home address on a stranger's network is harmless: nothing reusable is sent and only Burrow can answer the handshake.
+
+### Writes, trash and uploads (`writes.go`)
+- **Permission:** an edit grant and a writable mount (`mountWritable` asks the kernel). Moving or deleting a folder also needs edit on everything inside it (`canWriteTree`), so a carve-out can't be removed or carried off by someone it keeps out.
+- **Moves** use `renameat2(RENAME_NOREPLACE)` and rewrite grants, favorites, link paths, shared-folder items and cached hashes in one transaction, so permissions and links follow the folder. Moves across mounts are refused.
+- **Trash:** a delete is a rename into `.burrow-trash/<id>/` at the top of the item's mount (found in `/proc/self/mountinfo`) or of its library folder, so it is instant and on the same filesystem. Restore puts it back (as "name (restored 2)" if the name was taken). The daily maintenance pass removes entries after 30 days. Names starting with `.burrow-` are always hidden.
+- **Uploads:** `POST /api/uploads` reserves a hidden partial file next to the target; `PUT /api/uploads/{id}?offset=N` appends one chunk (up to 64 MB) after truncating to the recorded offset, fsyncs it, and saves the SHA-256 state with the offset; `POST …/finish` checks the hash and puts the file in place. Name conflicts: rename (default), overwrite (the old version goes to the trash through a hard link, then an atomic rename), skip or fail. `expect_size`/`expect_mtime` make an overwrite conditional on the version the app last saw. The file's mtime is set to the phone's.
+- **Index:** every write rescans the folders it touched right away (`Indexer.Refresh`), so browsing, search and the change log reflect it.
+
+### Sync
+- **Server:** `GET /api/sync/list` walks the folder on disk (exact at that moment), returns paths relative to it with size, mtime in ms and cached hashes, plus the hidden-name patterns and whether the folder is writable. Its cursor is read before the walk. `GET /api/sync/changed?since=` says whether anything under the folder entered the change log since, so an unchanged folder isn't listed again. `GET /api/sync/hash` computes and caches a SHA-256.
+- **Engine (`Sync.kt`):** three-way. For every path it compares the phone and Burrow with the base (both sides as they were when they last agreed) and picks from a fixed table per mode: backup, two-way, download. When both sides changed and the contents differ, both versions are kept as "name (conflict <phone> <time>).ext". A file that vanished from one path and appeared unchanged at another is moved on Burrow instead of uploaded again. Deletes and overwrites on Burrow are conditional on the version last seen; on the phone the file is checked again just before. Each step updates the base as it completes, uploads resume through `pending_upload`, and Burrow's side is listed only when its change log moved or every six hours.
+- **Phone side:** folders through the Storage Access Framework (`SafTree`), the camera roll through MediaStore (`MediaTree`, backup only, original bytes with locations when allowed). WorkManager runs each pair hourly under its own conditions and the photo backup within two minutes of new media; long runs show a progress notification as a data-sync foreground job.
+
+### On the phone
+- The device key is sealed with an AES key that lives in the Android Keystore and can't be exported. `allowBackup` is off and the data-extraction rules exclude everything, so keys never reach cloud backups or a new phone.
+- No plain HTTP (network security config), no user-added certificate authorities.
+- QR codes are read on the phone with ZXing, without Google Play services.
+- Files handed over by other apps (share menu, drag and drop) are copied into the app's cache first, because that access ends when the screen closes; the copy is deleted once sent.
+
+### Tests
+- `devices_test.go`, `writes_test.go`: pairing, handshakes, replay, tampering, truncation, what a recording proxy sees (no paths, names, contents or methods), revocation, disabled accounts, the public port and the admin list; mkdir, moves that carry grants and links, carve-out protection, trash and its purge, resumable uploads with a crash tail, checksums, every conflict mode, read-only mounts, sync listings and hashes, an upload through the channel.
+- `android/shared` (JVM, against the real server): interop, address fallback, pinning, a fake server, revocation, restart recovery; the sync engine in all three modes, conflicts, deletes, moves and a resumed upload.
+- `android/app` (Robolectric, against the real server): pairing from a link and using the app at phone, folded cover screen, unfolded and tablet sizes, with screenshots; a removed phone returning to pairing.
+- CI also runs the app on an Android emulator: the Keystore, a photo backup from the media library, background sync through WorkManager, and the R8-shrunk release build paired and browsed through its own screens.
 
 ## 17. Roadmap
 
-1. Phone pairing, the server identity check, and device tokens past the admin network list.
-2. Writable folders, resumable uploads, move, delete-to-trash and new folder (write grants in the UI).
-3. The sync API.
-4. The Android app, then the iPhone app.
+1. The iPhone app on the shared core (iOS targets with CryptoKit and URLSession).
+2. Phone files alongside NAS files, and drag out of the app.
+3. Browsing a photo server such as Immich inside the app.
 
 ---
 
 ## 18. Contributing
 
-- **Run the tests:** `go test ./...`. For a manual run: `BURROW_DATA=./testdata BURROW_STATE=./state BURROW_DROP=./drop go run .`, then open `http://localhost:47823`.
+- **Run the tests:** `go test ./...`. For a manual run: `BURROW_DATA=./testdata BURROW_STATE=./state BURROW_DROP=./drop go run .`, then open `https://localhost:47823`. For the phone app, see `android/` and the README.
 - **Conventions:** errors go through `httpErr`, JSON through `readJSON` and `writeJSON`, and handlers get the user with `userOf(r)`. A new library-facing endpoint needs a grant check (`resolveFor`, `canReach` or `scope`) and a test in `users_test.go`.
 - **Keep it pointer-based:** links and shared folders must never copy library files or create folders before they're needed.
