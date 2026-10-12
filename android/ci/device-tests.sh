@@ -26,7 +26,8 @@ adb shell "am start -W -a android.intent.action.VIEW -d '$L' io.github.xattribut
 dump() { adb shell uiautomator dump /sdcard/ui.xml > /dev/null 2>&1 && adb pull /sdcard/ui.xml "$W/ui.xml" > /dev/null 2>&1; }
 wait_for() {
   for _ in $(seq 1 45); do
-    dump && grep -q "text=\"$1\"" "$W/ui.xml" && return 0
+    # a text view keeps a file's last newline (&#10;)
+    dump && grep -qF -e "text=\"$1\"" -e "text=\"$1&#10;\"" "$W/ui.xml" && return 0
     sleep 2
   done
   echo "never saw \"$1\" on screen:"; grep -o 'text="[^"]*"' "$W/ui.xml" | sort -u | head -40; tail -30 "$W/server.log"
