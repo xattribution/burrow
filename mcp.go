@@ -14,7 +14,9 @@ import (
 
 // A small Model Context Protocol server over Streamable HTTP (JSON responses only).
 // Clients authenticate with an API token: Authorization: Bearer <token>. Every tool
-// acts as the user who made the token, with that user's folder permissions.
+// acts as the user who made the token, narrowed by the token's scope (tokens.go):
+// tools/list offers only the tools the scope turns on, and marks the "ask" ones so
+// Claude Code asks the user before every call.
 
 type rpcReq struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -40,6 +42,8 @@ type mcpTool struct {
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
 	Annotations map[string]any `json:"annotations,omitempty"`
+	Meta        map[string]any `json:"_meta,omitempty"`
+	group       string         // what the tool needs from the account: groupRead, groupShare, ...
 }
 
 func obj(props map[string]any, required ...string) map[string]any {
@@ -53,10 +57,13 @@ func obj(props map[string]any, required ...string) map[string]any {
 func str(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 func num(desc string) map[string]any { return map[string]any{"type": "number", "description": desc} }
 
-var readOnly = map[string]any{"readOnlyHint": true}
+var (
+	readOnly    = map[string]any{"readOnlyHint": true}
+	destructive = map[string]any{"destructiveHint": true}
+)
 
 var mcpTools = []mcpTool{
-	{Name: "search_files", Annotations: readOnly,
+	{Name: "search_files", group: groupRead, Annotations: readOnly,
 		Description: "Search the NAS index by file or folder name. Every word must appear somewhere in the path (substring match, case-insensitive). Prefix a word with - to exclude it. Supports ext:pdf and type:video inside the query.",
 		InputSchema: obj(map[string]any{
 			"query":          str("Words to match in the path, e.g. 'taxes 2024 -draft' or 'ext:stl bracket'"),
@@ -67,16 +74,16 @@ var mcpTools = []mcpTool{
 			"sort":           map[string]any{"type": "string", "enum": []string{"relevance", "newest", "oldest", "largest", "name"}},
 			"limit":          num("Max results (default 50, max 500)"),
 		})},
-	{Name: "list_directory", Annotations: readOnly,
+	{Name: "list_directory", group: groupRead, Annotations: readOnly,
 		Description: "List a folder. Use an empty path to list the library roots.",
 		InputSchema: obj(map[string]any{"path": str("Library path, e.g. 'PROJECTS/website'")})},
-	{Name: "file_info", Annotations: readOnly,
+	{Name: "file_info", group: groupRead, Annotations: readOnly,
 		Description: "Details for one file or folder, including any share links that point at it.",
 		InputSchema: obj(map[string]any{"path": str("Library path")}, "path")},
-	{Name: "read_text_file", Annotations: readOnly,
+	{Name: "read_text_file", group: groupRead, Annotations: readOnly,
 		Description: "Read the start of a text file (code, notes, csv, logs). Binary files are refused.",
 		InputSchema: obj(map[string]any{"path": str("Library path"), "max_kb": num("How much to read in KB (default 64, max 512)")}, "path")},
-	{Name: "recent_changes", Annotations: readOnly,
+	{Name: "recent_changes", group: groupRead, Annotations: readOnly,
 		Description: "Files added, modified or deleted on the NAS, newest first.",
 		InputSchema: obj(map[string]any{
 			"hours":  num("Look back this many hours (default 24)"),
@@ -84,7 +91,7 @@ var mcpTools = []mcpTool{
 			"kind":   map[string]any{"type": "string", "enum": []string{"added", "modified", "deleted"}},
 			"limit":  num("Max results (default 100)"),
 		})},
-	{Name: "create_share_link",
+	{Name: "create_share_link", group: groupShare,
 		Description: "Create a public share link for a file or folder. Returns the URL and a QR code URL. Ask the user before sharing anything sensitive.",
 		InputSchema: obj(map[string]any{
 			"path":          str("Library path to share"),
@@ -94,7 +101,7 @@ var mcpTools = []mcpTool{
 			"note":          str("Optional note shown to the recipient"),
 			"label":         str("Optional label for your own list of links"),
 		}, "path")},
-	{Name: "create_file_drop",
+	{Name: "create_file_drop", group: groupAdmin,
 		Description: "Create an upload-only link so someone can send files to the NAS without seeing anything on it.",
 		InputSchema: obj(map[string]any{
 			"label":         str("Name for the drop; also the folder name uploads land in"),
@@ -102,7 +109,7 @@ var mcpTools = []mcpTool{
 			"password":      str("Optional password"),
 			"note":          str("Optional note shown on the upload page"),
 		}, "label")},
-	{Name: "create_shared_folder",
+	{Name: "create_shared_folder", group: groupShare,
 		Description: "Create a shared folder: one link whose contents you can keep changing. Add library files or folders now or later with add_to_shared_folder; the link and password stay the same.",
 		InputSchema: obj(map[string]any{
 			"label":         str("Name shown to the recipient"),
@@ -112,34 +119,50 @@ var mcpTools = []mcpTool{
 			"note":          str("Optional note shown to the recipient"),
 			"allow_uploads": map[string]any{"type": "boolean", "description": "Let recipients add files too"},
 		}, "label")},
-	{Name: "add_to_shared_folder",
+	{Name: "add_to_shared_folder", group: groupShare,
 		Description: "Add library files or folders to an existing shared folder. Recipients see them immediately on the same link.",
 		InputSchema: obj(map[string]any{"id": str("Shared folder id (the part after /s/)"), "paths": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "id", "paths")},
-	{Name: "remove_from_shared_folder",
+	{Name: "remove_from_shared_folder", group: groupShare,
 		Description: "Remove a library path from a shared folder. Nothing on disk is deleted.",
 		InputSchema: obj(map[string]any{"id": str("Shared folder id"), "path": str("Library path to remove")}, "id", "path")},
-	{Name: "list_share_links", Annotations: readOnly,
+	{Name: "list_share_links", group: groupRead, Annotations: readOnly,
 		Description: "List share links with their state (active, expired, revoked, used-up, missing) and download counts.",
 		InputSchema: obj(map[string]any{"active_only": map[string]any{"type": "boolean"}, "path": str("Only links for this library path")})},
-	{Name: "revoke_share_link",
+	{Name: "revoke_share_link", group: groupShare,
 		Description: "Turn off a share link immediately.",
 		InputSchema: obj(map[string]any{"id": str("Share id (the part after /s/)")}, "id")},
-	{Name: "index_status", Annotations: readOnly,
+	{Name: "create_folder", group: groupEdit,
+		Description: "Create a folder. Needs edit access where it goes, in a folder mounted writable.",
+		InputSchema: obj(map[string]any{
+			"path":    str("Library path of the new folder, e.g. 'PROJECTS/website/assets'"),
+			"parents": map[string]any{"type": "boolean", "description": "Also create missing folders on the way"},
+		}, "path")},
+	{Name: "write_text_file", group: groupEdit,
+		Description: "Create a text file (notes, code, csv). Replacing an existing file needs overwrite: true; the old version then goes to Recently deleted for 30 days.",
+		InputSchema: obj(map[string]any{
+			"path":      str("Library path of the file, e.g. 'DOCUMENTS/notes/todo.md'"),
+			"text":      str("The whole content of the file"),
+			"overwrite": map[string]any{"type": "boolean", "description": "Replace the file if it exists"},
+		}, "path", "text")},
+	{Name: "move_item", group: groupEdit,
+		Description: "Move or rename a file or folder. Never replaces anything at the destination. Links, favorites and folder access follow it.",
+		InputSchema: obj(map[string]any{"from": str("Library path to move"), "to": str("New library path, including the name")}, "from", "to")},
+	{Name: "delete_item", group: groupEdit, Annotations: destructive,
+		Description: "Move a file or folder to Recently deleted, where it stays 30 days and can be restored from the web UI.",
+		InputSchema: obj(map[string]any{"path": str("Library path to delete")}, "path")},
+	{Name: "index_status", group: groupRead, Annotations: readOnly,
 		Description: "How many files and folders are indexed, total size, and whether a scan is running (totals for admins only).",
 		InputSchema: obj(map[string]any{})},
 }
 
-// adminTools are left out of tools/list for other users (and refused if called anyway).
-var adminTools = map[string]bool{"create_file_drop": true}
-
 func (a *App) handleMCP(w http.ResponseWriter, r *http.Request) {
-	u, tid := a.tokenUser(r)
+	u, ta := a.tokenUser(r)
 	if u == nil {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="burrow"`)
 		httpErr(w, http.StatusUnauthorized, "API token required (create one in Settings)")
 		return
 	}
-	r = withAuth(r, authInfo{user: u, viaAPI: true, tokenID: tid})
+	r = withAuth(r, authInfo{user: u, viaAPI: true, tokenID: ta.id, scope: &ta.scope})
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		httpErr(w, http.StatusMethodNotAllowed, "POST JSON-RPC messages to this endpoint")
@@ -213,14 +236,18 @@ func (a *App) mcpDispatch(r *http.Request, q rpcReq) (rpcResp, bool) {
 			"protocolVersion": pv,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "burrow", "version": version},
-			"instructions":    "Burrow indexes a NAS. Paths are library paths like 'DOCUMENTS/Taxes/2024.pdf'. Search first, then use file_info or read_text_file. Only create share links the user asked for.",
+			"instructions":    "Burrow indexes a NAS. Paths are library paths like 'DOCUMENTS/Taxes/2024.pdf'. Search first, then use file_info or read_text_file. Only create share links, or change files, when the user asked for it.",
 		}
 	case "ping":
 		resp.Result = map[string]any{}
 	case "tools/list":
 		tools := []mcpTool{}
 		for _, t := range mcpTools {
-			if !adminTools[t.Name] || userOf(r).Admin {
+			switch authOf(r).scope.mode(userOf(r), t) {
+			case toolAsk:
+				t.Meta = askMeta
+				tools = append(tools, t)
+			case toolOn:
 				tools = append(tools, t)
 			}
 		}
@@ -307,8 +334,19 @@ func (a *App) mcpCall(r *http.Request, name string, args map[string]any) (any, e
 		args = map[string]any{}
 	}
 	u := userOf(r)
-	if adminTools[name] && !u.Admin {
+	var tool *mcpTool
+	for i := range mcpTools {
+		if mcpTools[i].Name == name {
+			tool = &mcpTools[i]
+		}
+	}
+	switch {
+	case tool == nil:
+		return nil, fmt.Errorf("unknown tool %q", name)
+	case tool.group == groupAdmin && !u.Admin:
 		return nil, errAdminsOnly
+	case authOf(r).scope.mode(u, *tool) == toolOff:
+		return nil, fmt.Errorf("this token doesn't offer %s (Settings > MCP and API tokens)", name)
 	}
 	switch name {
 	case "search_files":
@@ -459,7 +497,7 @@ func (a *App) mcpCall(r *http.Request, name string, args map[string]any) (any, e
 			if owner == nil {
 				return nil, fmt.Errorf("this link's owner is no longer active")
 			}
-			if err := a.addItems(owner, s.ID, argList(args, "paths")); err != nil {
+			if err := a.addItems(owner, s.ID, argList(args, "paths"), u); err != nil {
 				return nil, err
 			}
 		} else {
@@ -485,6 +523,33 @@ func (a *App) mcpCall(r *http.Request, name string, args map[string]any) (any, e
 			return nil, fmt.Errorf("no share with that id")
 		}
 		return map[string]any{"revoked": argS(args, "id")}, nil
+
+	case "create_folder":
+		parents, _ := args["parents"].(bool)
+		e, err := a.mkdir(u, argS(args, "path"), parents)
+		if err != nil {
+			return nil, err
+		}
+		return toMCP([]Entry{e})[0], nil
+
+	case "write_text_file":
+		text, _ := args["text"].(string)
+		overwrite, _ := args["overwrite"].(bool)
+		return a.writeText(u, argS(args, "path"), text, overwrite)
+
+	case "move_item":
+		to, err := a.move(u, argS(args, "from"), argS(args, "to"))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"moved": cleanRel(argS(args, "from")), "to": to}, nil
+
+	case "delete_item":
+		_, rel, err := a.trash(u, argS(args, "path"), nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"deleted": rel, "restore": "Recently deleted in the web UI, for 30 days"}, nil
 
 	case "index_status":
 		s := a.idx.Status()

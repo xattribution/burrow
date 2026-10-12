@@ -97,6 +97,13 @@ form.stack { display: grid; gap: 10px; }
 .grant { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; align-items: center; }
 .grant .note { grid-column: 1 / -1; font-size: 13px; color: var(--caution); }
 .grant .note:empty { display: none; }
+.grant.folder { grid-template-columns: minmax(0, 1fr) auto; }
+.tools { display: grid; gap: 8px; }
+.tools h3 { margin: 6px 0 0; font-size: 13px; color: var(--ink-2); text-transform: uppercase; letter-spacing: .04em; }
+.tool { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; }
+.tool .muted { font-size: 13px; }
+@media (max-width: 480px) { .tool { grid-template-columns: 1fr; } }
+.row.end { justify-content: flex-end; flex-wrap: nowrap; }
 .secret { font-family: var(--mono); font-size: 13px; padding: 8px; background: var(--surface); overflow-wrap: anywhere; user-select: all; }
 pre.code { font: 13px/1.5 var(--mono); background: var(--surface); padding: 10px; overflow: auto; margin: 0; }
 

@@ -43,7 +43,7 @@ The backup holds settings, users, links, link history, API tokens and the change
 - **Activity** has two logs. One records files added, modified and deleted, kept for 180 days. The other records every link open, download, upload and wrong password, with the visitor's IP. Each user sees changes in their folders and activity on their own links.
 - **Overview** charts size by library, size by file type and changes per day, counting only what you can see.
 - **Favorites** pin files and folders to your sidebar.
-- **MCP** endpoint at `/mcp` with tools for search, listing folders, file info, reading text files, recent changes, creating share links and file drops, listing and revoking links, and index status. Tools act as the user who made the token.
+- **MCP** endpoint at `/mcp` with tools for search, listing folders, file info, reading text files, recent changes, share links, shared folders and file drops, new folders, writing text files, moving, deleting to the trash, and index status. Tools act as the user who made the token, and each token sets which tools it offers, which folders it reaches, and whether Claude Code must ask before every call.
 
 ## Measured performance
 
@@ -164,7 +164,7 @@ The container's user needs write permission on that folder. Deleted files move t
 
 ## Connecting an LLM
 
-Create a token in **Settings → MCP and API tokens**. Burrow shows the token once, together with a ready-made client config:
+Create a token in **Settings → MCP and API tokens → New token**. Burrow shows the token once, together with a ready-made client config:
 
 ```json
 {
@@ -178,7 +178,37 @@ Create a token in **Settings → MCP and API tokens**. Burrow shows the token on
 }
 ```
 
-A token can see and share exactly what the account that made it can, and nothing more. Make a separate user with narrower folder access if you want an LLM to see less than you do. Delete the token in Settings to cut access. MCP is reachable on the LAN port, and on the public port only if you turn that on under **Settings → Public port**.
+A token never reaches further than the account that made it, and you can narrow it further when you create it or later with **Edit**:
+
+| Setting | Choices |
+|---|---|
+| Tools | Each tool **Off**, **Ask** or **On**, grouped as read, share, edit and admin, with presets: Read only, Read and share, Everything, Nothing. New tokens start at Read and share, all on Ask. |
+| Folders | Every folder the account can see, or only the folders you list. Search, previews, links, the change log and edits all stay inside them, and the token sees only links that point there. |
+| REST API | Off by default: the token works only at `/mcp`. On: scripts can use it too, with the same folders, and sharing or editing only if it offers a share or edit tool. |
+
+**Ask** marks the tool so Claude Code asks you before every call, in every permission mode (auto and bypass included), with no "don't ask again". Other MCP clients may treat it like **On**, which leaves the decision to the client's own permission settings. A token without the admin tools has no admin powers, even when an admin made it. Tokens made before these settings existed offer every tool on **Ask** and keep REST API access.
+
+Delete the token in Settings to cut access. MCP is reachable on the LAN port, and on the public port only if you turn that on under **Settings → Public port**.
+
+### Claude Code plugin
+
+For Claude Code, install the plugin instead of pasting the config:
+
+```
+/plugin install burrow --marketplace xattribution/burrow
+```
+
+It asks for the MCP endpoint and a token, and keeps the token in your system's credential store rather than a settings file. It also adds a hook that asks you before every Burrow call, on top of the token's **Ask** settings. Besides the tools, it adds five commands:
+
+| Command | What it does |
+|---|---|
+| `/burrow:find <description>` | Finds files from a plain description |
+| `/burrow:share <what> [options]` | Makes a link: "the 2024 tax folder for mom, one week, with a password" |
+| `/burrow:links` | Lists your links, flags the exposed ones, turns off the ones you pick |
+| `/burrow:changes [span] [folder]` | Summarizes what changed |
+| `/burrow:drop <name>` | Makes an upload-only link (admins only) |
+
+Or just ask: "find the bracket STL I changed last week and give me a link to it". See [`claude-plugin`](claude-plugin/README.md).
 
 ## Configuration
 
@@ -224,6 +254,7 @@ Folders named `.zfs`, `@eaDir`, `#recycle`, `.Trash-*`, `$RECYCLE.BIN` and a few
 - **Accounts:**
   - Two-factor sign-in with authenticator-app codes is available to every user. Turning it on needs the password, each code works once, and you get 10 single-use recovery codes.
   - API tokens can't change passwords, 2FA, tokens, settings or users.
+  - Each token is narrowed to its own tools and folders on every request, MCP and REST alike: the narrowing is applied to the account it acts as, so every permission check that guards the web UI guards the token too.
   - The database (password hashes, 2FA secrets) is readable by Burrow's user only.
 - **Recovery:** an admin can set a new password under **Users**, which also revokes that user's API tokens. If you lose the only admin password, run `docker exec <container> burrow reset-password <username> --admin`. It prints a temporary password, turns off that user's 2FA, revokes their tokens and makes them an admin. Links and settings are kept.
 

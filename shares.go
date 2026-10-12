@@ -115,14 +115,15 @@ func (a *App) getShare(id string) (Share, error) {
 	return scanShare(a.st.db.QueryRow(`SELECT `+shareCols+` FROM shares s WHERE s.id=?`, id))
 }
 
-// ownedShare loads a share u may manage: their own, or any share for an admin.
-// Anyone else gets "not found", so share ids can't be probed.
+// ownedShare loads a share u may manage: their own, or any share for an admin, and
+// through a folder-limited token only links inside its folders. Anyone else gets
+// "not found", so share ids can't be probed.
 func (a *App) ownedShare(u *User, id string) (Share, error) {
 	s, err := a.getShare(id)
 	if err != nil {
 		return s, err
 	}
-	if !u.Admin && s.OwnerID != u.ID {
+	if (!u.Admin && s.OwnerID != u.ID) || !a.shareInScope(u, s) {
 		return Share{}, sql.ErrNoRows
 	}
 	return s, nil
@@ -172,7 +173,7 @@ func (a *App) listShares(r *http.Request, u *User, pathFilter string, activeOnly
 			owners[s.OwnerID] = o
 		}
 		s.State = a.shareStateFor(&s, o)
-		if activeOnly && s.State != "active" {
+		if (activeOnly && s.State != "active") || !a.shareInScope(u, s) {
 			continue
 		}
 		s.URL = base + "/s/" + s.ID
@@ -300,7 +301,7 @@ func (a *App) createShare(r *http.Request, u *User, in ShareInput) (Share, error
 		return Share{}, err
 	}
 	if in.Mode == "collection" {
-		if err := a.addItems(u, id, in.Items); err != nil {
+		if err := a.addItems(u, id, in.Items, u); err != nil {
 			return Share{}, err
 		}
 	}
@@ -407,9 +408,15 @@ func (a *App) shareEvents(u *User, id string, limit int) ([]ShareEvent, error) {
 		}
 		q += ` AND share_id=?`
 		args = append(args, id)
-	} else if !u.Admin {
-		q += ` AND share_id IN (SELECT id FROM shares WHERE owner_id=?)`
-		args = append(args, u.ID)
+	} else {
+		if !u.Admin {
+			q += ` AND share_id IN (SELECT id FROM shares WHERE owner_id=?)`
+			args = append(args, u.ID)
+		}
+		if fc, fargs := u.lim.foldersCond("path"); fc != "" {
+			q += ` AND share_id IN (SELECT id FROM shares WHERE mode='link' AND ` + fc + `)`
+			args = append(args, fargs...)
+		}
 	}
 	q += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)

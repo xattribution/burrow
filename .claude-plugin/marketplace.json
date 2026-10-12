@@ -1,0 +1,15 @@
+{
+  "name": "burrow",
+  "owner": {
+    "name": "xattribution",
+    "url": "https://github.com/xattribution"
+  },
+  "description": "Claude Code plugin for Burrow, the NAS search and share-link server.",
+  "plugins": [
+    {
+      "name": "burrow",
+      "source": "./claude-plugin",
+      "description": "Search, read and share the files on your Burrow NAS from Claude Code."
+    }
+  ]
+}

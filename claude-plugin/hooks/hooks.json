@@ -1,0 +1,16 @@
+{
+  "description": "Ask before every Burrow tool call, auto mode included.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_burrow_burrow__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"Burrow plugin: every call to your NAS needs your OK\"}}'"
+          }
+        ]
+      }
+    ]
+  }
+}
