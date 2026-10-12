@@ -100,12 +100,23 @@ class SyncEngine(
         // List Burrow's side only when something changed there since last time
         // (or every few hours, in case a change slipped past the change log).
         val fresh = now() - pair.last_full > 6 * 3600 || pair.cursor == 0L ||
-            api.syncChanged(root, pair.cursor).changed
+            missingAsChanged { api.syncChanged(root, pair.cursor).changed }
         var excludes = DEFAULT_EXCLUDES
         var writable = true
         val remote: Map<String, Remote>
         if (fresh) {
-            val l = api.syncList(root)
+            val l = try {
+                api.syncList(root)
+            } catch (e: ApiException) {
+                if (e.status != 404) throw e
+                // The folder on Burrow isn't there. A first sync makes it. A folder
+                // that was there and is gone is never read as "everything was
+                // deleted": a backup puts it all back, the other modes stop.
+                if (mode == SyncMode.DOWNLOAD || (mode == SyncMode.TWO_WAY && base.isNotEmpty()))
+                    throw ApiException(404, "The folder $root isn't on Burrow any more. Nothing on the phone was changed.")
+                api.mkdir(root, parents = true)
+                api.syncList(root)
+            }
             excludes = l.excludes
             writable = l.writable
             remote = l.entries.filterNot { excluded(it.path, excludes) }.associate { it.path to Remote(it.dir, Stamp(it.size, it.mtime), it.hash) }
@@ -442,6 +453,13 @@ class SyncEngine(
     }
 
     /** Syncs one pair. Progress is reported as it goes; the result says what happened. */
+    private inline fun missingAsChanged(check: () -> Boolean): Boolean = try {
+        check()
+    } catch (e: ApiException) {
+        if (e.status != 404) throw e
+        true
+    }
+
     suspend fun sync(pair: PairRow, local: LocalTree, progress: (SyncProgress) -> Unit = {}): SyncReport {
         try {
             val rep = run(pair, local, progress)

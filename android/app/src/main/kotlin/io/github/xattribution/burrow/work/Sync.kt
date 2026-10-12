@@ -14,6 +14,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import io.github.xattribution.burrow.core.ApiException
 import io.github.xattribution.burrow.core.ChannelException
 import io.github.xattribution.burrow.core.NotPairedException
 import io.github.xattribution.burrow.core.SyncEngine
@@ -134,6 +135,8 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
                 } catch (e: SecurityException) {
                     // the folder permission was taken back (or the photo permission): the pair can't run
                     q.finished(p.last_sync, "Burrow lost access to this folder on the phone. Pick it again.", p.id)
+                } catch (e: ApiException) {
+                    // Burrow refused this pair (its folder is gone, say): the engine noted why on the pair; go on with the others
                 }
             }
         } catch (e: NotPairedException) {

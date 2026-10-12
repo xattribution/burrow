@@ -9,6 +9,7 @@ import java.io.File
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -35,12 +36,12 @@ class SyncTest {
 
     private class Fixture(val db: BurrowDb, val engine: SyncEngine, val dir: File, val tree: FileTree, val pairId: Long, val remote: File)
 
-    private fun fixture(mode: SyncMode, remote: String): Fixture {
+    private fun fixture(mode: SyncMode, remote: String, create: Boolean = true): Fixture {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         BurrowDb.Schema.create(driver)
         val db = BurrowDb(driver)
         val dir = Files.createTempDirectory("phone").toFile()
-        File(server.lib, remote).mkdirs()
+        if (create) File(server.lib, remote).mkdirs()
         db.pairQueries.insert("t", dir.path, "phone", remote, mode.id, 0, 0, 1)
         val id = db.pairQueries.all().executeAsList().last().id
         return Fixture(db, SyncEngine(api, db, now = { clock++ }, conflictTag = { "conflict Sync Test" }), dir, FileTree(dir), id, File(server.lib, remote))
@@ -164,6 +165,30 @@ class SyncTest {
         assertEquals(1, fx.sync().conflicts)
         assertEquals("nas four", File(fx.remote, "DCIM/Camera/IMG_4.jpg").readText())
         assertEquals("phone 4!", File(fx.remote, "DCIM/Camera/IMG_4 (conflict Sync Test).jpg").readText())
+    }
+
+    @Test
+    fun aMissingFolderOnBurrow() {
+        // the first sync makes it
+        val fx = fixture(SyncMode.TWO_WAY, "SYNC/new/deep", create = false)
+        write(File(fx.dir, "a.txt"), "a")
+        assertEquals(1, fx.sync().uploaded)
+        assertEquals("a", File(fx.remote, "a.txt").readText())
+        // once synced, a folder that disappears is not "delete everything on the phone"
+        fx.remote.deleteRecursively()
+        settle()
+        val e = assertFailsWith<ApiException> { runBlocking { fx.engine.sync(fx.db.pairQueries.byId(fx.pairId).executeAsOne(), fx.tree) } }
+        assertEquals(404, e.status)
+        assertEquals("a", File(fx.dir, "a.txt").readText())
+        assertFalse(fx.remote.exists())
+        // a backup puts it back
+        val bx = fixture(SyncMode.BACKUP, "PHOTOS/gone", create = false)
+        write(File(bx.dir, "DCIM/IMG_1.jpg"), "one")
+        assertEquals(1, bx.sync().uploaded)
+        bx.remote.deleteRecursively()
+        settle()
+        assertEquals(1, bx.sync().uploaded)
+        assertEquals("one", File(bx.remote, "DCIM/IMG_1.jpg").readText())
     }
 
     @Test
