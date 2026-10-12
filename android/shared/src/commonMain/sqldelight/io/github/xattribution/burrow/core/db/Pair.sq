@@ -1,0 +1,111 @@
+-- Folder pairs: a folder on the phone (or the photo library) and a folder on Burrow.
+CREATE TABLE pair (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  local_uri TEXT NOT NULL,
+  local_label TEXT NOT NULL,
+  remote TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  wifi_only INTEGER NOT NULL DEFAULT 1,
+  charging_only INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  cursor INTEGER NOT NULL DEFAULT 0,
+  last_full INTEGER NOT NULL DEFAULT 0,
+  last_sync INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created INTEGER NOT NULL
+);
+
+all:
+SELECT * FROM pair ORDER BY created;
+
+byId:
+SELECT * FROM pair WHERE id = ?;
+
+insert:
+INSERT INTO pair(name, local_uri, local_label, remote, mode, wifi_only, charging_only, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+lastId:
+SELECT last_insert_rowid();
+
+update:
+UPDATE pair SET name = ?, mode = ?, wifi_only = ?, charging_only = ?, enabled = ? WHERE id = ?;
+
+setCursor:
+UPDATE pair SET cursor = ?, last_full = ? WHERE id = ?;
+
+finished:
+UPDATE pair SET last_sync = ?, last_error = ? WHERE id = ?;
+
+-- What both sides looked like when they last agreed, per path.
+CREATE TABLE base (
+  pair_id INTEGER NOT NULL,
+  path TEXT NOT NULL,
+  dir INTEGER NOT NULL DEFAULT 0,
+  l_size INTEGER NOT NULL,
+  l_mtime INTEGER NOT NULL,
+  r_size INTEGER NOT NULL,
+  r_mtime INTEGER NOT NULL,
+  hash TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (pair_id, path)
+);
+
+baseOf:
+SELECT * FROM base WHERE pair_id = ?;
+
+putBase:
+INSERT OR REPLACE INTO base(pair_id, path, dir, l_size, l_mtime, r_size, r_mtime, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+dropBase:
+DELETE FROM base WHERE pair_id = ? AND path = ?;
+
+dropBaseTree:
+DELETE FROM base WHERE pair_id = ? AND (path = ? OR path LIKE ? ESCAPE '\');
+
+countBase:
+SELECT count(*) FROM base WHERE pair_id = ? AND dir = 0;
+
+-- Uploads in progress, so an interrupted one resumes where it stopped.
+CREATE TABLE pending_upload (
+  pair_id INTEGER NOT NULL,
+  path TEXT NOT NULL,
+  upload_id TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  mtime INTEGER NOT NULL,
+  PRIMARY KEY (pair_id, path)
+);
+
+pendingOf:
+SELECT * FROM pending_upload WHERE pair_id = ? AND path = ?;
+
+putPending:
+INSERT OR REPLACE INTO pending_upload(pair_id, path, upload_id, size, mtime) VALUES (?, ?, ?, ?, ?);
+
+dropPending:
+DELETE FROM pending_upload WHERE pair_id = ? AND path = ?;
+
+-- Recent activity per pair, newest last.
+CREATE TABLE log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pair_id INTEGER NOT NULL,
+  ts INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  path TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT ''
+);
+
+addLog:
+INSERT INTO log(pair_id, ts, kind, path, detail) VALUES (?, ?, ?, ?, ?);
+
+trimLog:
+DELETE FROM log WHERE pair_id = ? AND id <= (SELECT id FROM log WHERE pair_id = ? ORDER BY id DESC LIMIT 1 OFFSET 500);
+
+recentLog:
+SELECT * FROM log WHERE pair_id = ? ORDER BY id DESC LIMIT ?;
+
+remove {
+  DELETE FROM base WHERE pair_id = :id;
+  DELETE FROM pending_upload WHERE pair_id = :id;
+  DELETE FROM log WHERE pair_id = :id;
+  DELETE FROM pair WHERE id = :id;
+}

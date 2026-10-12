@@ -79,6 +79,8 @@ type Indexer struct {
 	w       *fsnotify.Watcher
 	watched map[string]bool
 	wFull   bool
+
+	refreshMu sync.Mutex // one shallow rescan at a time
 }
 
 func newIndexer(cfg Config, st *Store) *Indexer {
@@ -113,7 +115,7 @@ func (ix *Indexer) excluded(name string) bool {
 	// case-insensitive, so a hidden name can't be reached by changing its case on
 	// a case-insensitive dataset
 	name = strings.ToLower(name)
-	if strings.HasPrefix(name, partPrefix) { // upload in progress
+	if strings.HasPrefix(name, ".burrow-") { // uploads in progress, the trash
 		return true
 	}
 	ix.mu.Lock()
@@ -172,6 +174,27 @@ func (ix *Indexer) Rescan() {
 	case ix.kick <- struct{}{}:
 	default:
 	}
+}
+
+// Refresh rescans folders Burrow itself just changed, right away, so browsing,
+// search and the change log show the change at once. During a full scan (or
+// before the first) they are queued instead; the scan reconciles them anyway.
+func (ix *Indexer) Refresh(rels ...string) {
+	ix.mu.Lock()
+	busy := ix.status.Scanning
+	ix.mu.Unlock()
+	if busy || ix.st.get("initial_scan_done") != "1" {
+		for _, r := range rels {
+			ix.Touch(r)
+		}
+		return
+	}
+	ix.refreshMu.Lock()
+	defer ix.refreshMu.Unlock()
+	for _, r := range rels {
+		_ = ix.scanDir(r, false, true)
+	}
+	ix.refreshCounts()
 }
 
 // Touch marks a directory for a quick shallow rescan (used when someone browses it).
@@ -579,9 +602,11 @@ func (ix *Indexer) dirtyLoop(ctx context.Context) {
 		if ix.st.get("initial_scan_done") != "1" {
 			continue // the first full scan will pick these up
 		}
+		ix.refreshMu.Lock()
 		for _, d := range list {
 			_ = ix.scanDir(d, false, true)
 		}
+		ix.refreshMu.Unlock()
 		ix.refreshCounts()
 	}
 }

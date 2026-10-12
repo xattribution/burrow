@@ -39,6 +39,11 @@ const ICONS = {
   qr: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z',
   up: 'M12 19V5M5 12l7-7 7 7',
   user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 20a8 8 0 0 1 16 0',
+  phone: 'M8 2h8a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zM11 18h2',
+  trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3',
+  upload: 'M12 16V4M7 9l5-5 5 5M5 20h14',
+  plus: 'M12 5v14M5 12h14',
+  edit: 'M4 20h4L19 9l-4-4L4 16zM13 7l4 4',
 };
 function icon(name, cls = '') {
   const s = document.createElementNS(SVGNS, 'svg');
@@ -253,6 +258,7 @@ async function loadNav() {
     LIBS.map(l => h('div', { class: 'lib' }, link(l.name, 'folder', { view: 'browse', path: l.path }, inLib && (s.path === l.path || s.path.startsWith(l.path + '/'))))),
     favs.length ? h('h3', { class: 'lib' }, 'Favorites') : null,
     favs.map(f => h('div', { class: 'lib' }, link(f.name, f.dir ? 'folder' : f.kind || 'file', f.dir ? { view: 'browse', path: f.path } : { view: 'browse', path: parentOf(f.path), sel: f.path }, inLib && s.path === f.path))),
+    link('Recently deleted', 'trash', { view: 'trash' }, s.view === 'trash'),
     h('h3', {}, 'Sharing'),
     link('Links', 'link', { view: 'shares' }, s.view === 'shares'),
     link('Activity', 'activity', { view: 'activity' }, s.view === 'activity'),
@@ -287,6 +293,7 @@ async function route() {
     else if (s.view === 'overview') await viewOverview(s, seq);
     else if (s.view === 'settings') await viewSettings(s, seq);
     else if (s.view === 'users' && ME.admin) await viewUsers(s, seq);
+    else if (s.view === 'trash') await viewTrash(s, seq);
     else await viewBrowse(s, seq);
   } catch (e) {
     if (seq !== routeSeq) return;
@@ -311,8 +318,10 @@ async function viewBrowse(s, seq) {
     crumbs.append(h('span', { class: 'sep' }, '/'));
     crumbs.append(i === segs.length - 1 ? h('b', {}, seg) : h('a', { href: '?path=' + encodeURIComponent(p), onclick: e => { e.preventDefault(); nav({ path: p, sel: '' }); } }, seg));
   });
-  const actions = s.path && data.can_share ? h('div', { class: 'row' },
-    h('button', { class: 'btn', onclick: () => nav({ sel: s.path }) }, icon('link'), 'Share this folder')) : null;
+  const actions = s.path && (data.can_share || data.can_write) ? h('div', { class: 'row' },
+    data.can_write ? uploadButton(s.path) : null,
+    data.can_write ? newFolderControl(s.path) : null,
+    data.can_share ? h('button', { class: 'btn', onclick: () => nav({ sel: s.path }) }, icon('link'), 'Share this folder') : null) : null;
   put($('#sub'), crumbs, h('span', { class: 'grow' }), actions);
   CURRENT = data.entries;
   put($('#content'), fileTable(data.entries, { search: false }) || (s.path ? emptyState('This folder is empty.')
@@ -477,6 +486,7 @@ async function openPanelFor(path) {
         : h('a', { class: 'btn', href: raw + '&dl=1' }, icon('download'), 'Download'),
       e.dir && s.path !== e.path ? h('button', { class: 'btn', onclick: () => nav({ view: 'browse', path: e.path, q: '', sel: '' }) }, 'Open') : null,
       copyBtn, favBtn),
+    d.can_change ? h('div', { class: 'row' }, renameControl(e), deleteControl(e)) : null,
     d.can_share || d.shares.length ? h('h3', {}, 'Share links') : null,
     d.can_share || d.shares.length ? linksList(d.shares, () => { panelFor = ''; openPanelFor(path); route(); }) : null,
     d.can_share ? h('div', { class: 'row' }, newLinkForm(e, () => { panelFor = ''; openPanelFor(path); route(); }), addToFolderControl(e, () => { panelFor = ''; openPanelFor(path); route(); })) : null);
@@ -839,8 +849,8 @@ async function viewOverview(s, seq) {
 }
 
 // ---------- users (admins only) ----------
-const ACCESS = [['read', 'View'], ['share', 'View and share'], ['none', 'No access']];
-const grantAccess = g => !g.read ? 'none' : g.share ? 'share' : 'read';
+const ACCESS = [['read', 'View'], ['share', 'View and share'], ['write', 'View and edit'], ['all', 'View, edit and share'], ['none', 'No access']];
+const grantAccess = g => !g.read ? 'none' : g.write && g.share ? 'all' : g.write ? 'write' : g.share ? 'share' : 'read';
 function accessSummary(u) {
   if (u.admin) return 'Every folder';
   const open = u.grants.filter(g => g.read).map(g => g.path);
@@ -878,17 +888,28 @@ function grantsEditor(grants) {
       oninput: e => { clearTimeout(t); t = setTimeout(() => suggest(e.target.value.trim()), 150); }, onfocus: e => suggest(e.target.value.trim()) });
     const access = h('select', { 'aria-label': 'Access' }, ACCESS.map(([v, l]) => h('option', { value: v }, l)));
     access.value = grantAccess(g);
-    const row = h('div', { class: 'grant' }, path, access, h('button', { type: 'button', class: 'iconbtn', 'aria-label': 'Remove folder', title: 'Remove', onclick: () => row.remove() }, icon('x')));
+    const note = h('span', { class: 'note' });
+    // edit only works where the folder is mounted writable; say so next to the choice
+    const check = async () => {
+      note.textContent = '';
+      const p = path.value.trim();
+      if (!p || !['write', 'all'].includes(access.value)) return;
+      try { if (!(await api('/api/ls?path=' + encodeURIComponent(p), { quiet: true })).can_write) note.textContent = 'Mounted read-only, so edits won\u2019t work yet'; } catch { /* not a folder yet */ }
+    };
+    access.addEventListener('change', check);
+    path.addEventListener('change', check);
+    check();
+    const row = h('div', { class: 'grant' }, path, access, h('button', { type: 'button', class: 'iconbtn', 'aria-label': 'Remove folder', title: 'Remove', onclick: () => row.remove() }, icon('x')), note);
     list.append(row);
     return path;
   };
   grants.forEach(g => addRow(g));
   const read = () => [...list.querySelectorAll('.grant')].map(r => {
     const a = r.querySelector('select').value;
-    return { path: r.querySelector('input').value.trim(), read: a !== 'none', share: a === 'share' };
+    return { path: r.querySelector('input').value.trim(), read: a !== 'none', share: a === 'share' || a === 'all', write: a === 'write' || a === 'all' };
   }).filter(g => g.path);
   const el = h('div', { class: 'field' },
-    h('span', {}, 'Folder access', info('Each folder includes everything inside it. The most specific folder wins, so No access on a subfolder hides it inside a folder they can view. Links a user made stop working if they lose share access.')),
+    h('span', {}, 'Folder access', info('Each folder includes everything inside it. The most specific folder wins, so No access on a subfolder hides it inside a folder they can view. Edit (upload, new folders, rename, delete to trash) also needs the folder mounted writable. Links a user made stop working if they lose share access.')),
     list, options,
     h('div', { class: 'row' }, h('button', { type: 'button', class: 'btn', onclick: () => addRow().focus() }, 'Add folder')));
   return { el, read };
@@ -949,7 +970,9 @@ async function openUserPanel(id) {
         try { await api('/api/users/' + u.id, { method: 'DELETE' }); nav({ user: '' }); } catch (x) { actErr.textContent = x.message; }
       } }, 'Delete user') : null,
       u.username !== ME.user ? info('Deleting turns off every link this user made. Files are never touched.') : null),
-    actErr];
+    actErr,
+    h('h3', {}, 'Phones'),
+    devicesList(true, d => d.user_id === u.id)];
   panelShell(isNew ? 'New user' : u.username, f, account);
   if (isNew) f.username.focus();
 }
@@ -981,6 +1004,9 @@ async function viewSettings(s, seq) {
     admin ? [section('Public address', 'Share links and QR codes are built from this address.',
       h('input', { name: 'url', value: st.public_url, placeholder: location.origin, inputmode: 'url' }),
       f => api('/api/settings', { method: 'PUT', body: { public_url: f.url.value } })),
+    section('Home address for phones', 'Paired phones use this address on your home network and the public address everywhere else. Leave it empty to use the address of this browser tab when you pair.',
+      h('input', { name: 'lan', value: st.lan_url, placeholder: location.origin, inputmode: 'url' }),
+      f => api('/api/settings', { method: 'PUT', body: { lan_url: f.lan.value } })),
     section('Public port', `Port ${st.public_addr || '(off)'} is the one to forward from your reverse proxy. It always serves share links, and nothing else unless you turn it on here.`,
       h('div', { class: 'checks' },
         h('label', {}, h('input', { type: 'checkbox', name: 'pui', checked: st.public_ui }), 'Also serve the web UI and its API'),
@@ -1000,6 +1026,8 @@ async function viewSettings(s, seq) {
     section('Admin access', 'Optional. Comma-separated IPs or CIDR ranges allowed to open this admin page and the API, e.g. 192.168.1.0/24, 100.64.0.0/10. Share links keep working from anywhere. Leave empty to allow any network.',
       h('input', { name: 'cidrs', value: st.admin_cidrs, placeholder: 'Any network', class: 'mono' }),
       f => api('/api/settings', { method: 'PUT', body: { admin_cidrs: f.cidrs.value } }))] : null,
+    section('Phones', 'The Burrow app browses, shares, backs up and syncs your files. A paired phone acts as you, with your folder access, and talks to Burrow end-to-end encrypted, so even your reverse proxy only sees scrambled data. Remove a phone to cut it off at once.',
+      (() => { const devs = devicesList(false); return [devs, pairPhone(() => devs.reload())]; })(), null),
     section('MCP and API tokens', 'Tokens let an LLM client (or a script) search, read and share through the MCP endpoint. A token can see and share only what your account can, and can\u2019t change account settings. Delete it to cut access.',
       [h('dl', { class: 'facts' }, h('dt', {}, 'MCP endpoint'), h('dd', { class: 'mono' }, mcpURL)),
         tokens.length ? h('table', { class: 'files' }, h('tbody', {}, tokens.map(t => h('tr', {},
@@ -1080,3 +1108,202 @@ function setTheme(v) { localSet('theme', v); if (v) document.documentElement.dat
 setTheme(localGet('theme') || '');
 
 boot();
+
+// ---------- phones ----------
+function devicesList(all, keep = () => true) {
+  const box = h('div', { class: 'stack' }, h('p', { class: 'muted' }, 'Loading…'));
+  const load = async () => {
+    let ds;
+    try { ds = (await api('/api/devices' + (all ? '?all=1' : ''))).filter(keep); } catch (x) { put(box, h('p', { class: 'err' }, x.message)); return; }
+    if (!ds.length) { put(box, h('p', { class: 'muted' }, 'No phones paired.')); return; }
+    put(box, h('table', { class: 'files' }, h('tbody', {}, ds.map(d => h('tr', {},
+      h('td', { class: 'name' }, h('span', {}, icon('phone'), h('span', { class: 'label' }, d.name)), h('span', { class: 'where' }, [d.model, d.app_version && 'app ' + d.app_version].filter(Boolean).join(', ') || d.platform)),
+      h('td', { class: 'muted' }, d.last_seen ? `${fmtWhen(d.last_seen)}, ${d.last_via === 'public' ? 'away' : 'at home'}` : 'Not yet', d.last_ip ? h('span', { class: 'where' }, d.last_ip) : null),
+      h('td', { class: 'muted hide-s' }, 'Paired ' + fmtDate(d.created)),
+      h('td', { class: 'r' }, h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
+        const b = ev.currentTarget;
+        if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Remove ' + d.name; return; }
+        try { await api('/api/devices/' + d.id, { method: 'DELETE' }); load(); } catch (x) { b.textContent = x.message; }
+      } }, 'Remove')))))));
+  };
+  load();
+  box.reload = load;
+  return box;
+}
+
+function pairPhone(onPaired) {
+  const box = h('div', { class: 'stack' });
+  const start = async () => {
+    let d;
+    try { d = await api('/api/devices/pair', { method: 'POST' }); } catch (x) { put(box, h('p', { class: 'err' }, x.message), startBtn); return; }
+    const left = h('b', { class: 'num' });
+    const status = h('p', {}, 'Waiting for the phone…');
+    put(box,
+      h('p', {}, 'In the Burrow app, tap ', h('b', {}, 'Pair with Burrow'), ' and scan this code. It works once and expires in ', left, '.'),
+      h('div', { class: 'qr' }, h('img', { src: d.qr, alt: 'Pairing QR code' })),
+      h('dl', { class: 'facts' },
+        h('dt', {}, 'At home'), h('dd', { class: 'mono' }, d.lan || 'Not set (the phone will only use the public address)'),
+        h('dt', {}, 'Away'), h('dd', { class: 'mono' }, d.public || 'Not set (the phone will only work at home)')),
+      h('details', {}, h('summary', {}, 'Can’t scan?'),
+        h('p', { class: 'muted' }, 'Open this link on the phone itself. It holds a one-time secret: don’t send it through chat or email.'),
+        h('div', { class: 'secret' }, d.link),
+        h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: ev => copy(d.link, ev.currentTarget) }, 'Copy link'))),
+      status,
+      h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: async () => {
+        stop = true; await api('/api/devices/pair/' + d.id, { method: 'DELETE' }).catch(() => {}); put(box, startBtn);
+      } }, 'Cancel')));
+    let stop = false;
+    const tick = async () => {
+      if (stop || !box.isConnected) return;
+      const secs = Math.max(0, Math.round(d.expires - Date.now() / 1000));
+      left.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+      let st;
+      try { st = await api('/api/devices/pair/' + d.id, { quiet: true }); } catch { st = { status: 'waiting' }; }
+      if (st.status === 'paired') {
+        put(box, h('p', {}, h('b', {}, `Paired with ${st.device.name}.`), ' It can now reach Burrow at home and away.'), startBtn);
+        onPaired?.();
+        return;
+      }
+      if (st.status === 'expired' || secs === 0) { put(box, h('p', { class: 'muted' }, 'That code expired.'), startBtn); return; }
+      setTimeout(tick, 2000);
+    };
+    tick();
+  };
+  const startBtn = h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: start }, icon('phone'), 'Pair a phone'));
+  put(box, startBtn);
+  return box;
+}
+
+// ---------- changing files ----------
+const CHUNK = 8 << 20;
+function uploadButton(dir) {
+  const input = h('input', { type: 'file', multiple: true, hidden: true, onchange: () => { if (input.files.length) uploadFiles(dir, [...input.files]); input.value = ''; } });
+  return h('span', {}, input, h('button', { class: 'btn', type: 'button', onclick: () => input.click() }, icon('upload'), 'Upload'));
+}
+
+function uploadTray() {
+  let t = $('#tray');
+  if (!t) {
+    t = h('div', { class: 'tray', id: 'tray', role: 'status' },
+      h('div', { class: 'row' }, h('b', {}, 'Uploads'), h('span', { class: 'grow' }), h('button', { class: 'iconbtn', 'aria-label': 'Close', onclick: () => t.remove() }, icon('x'))),
+      h('ul', {}));
+    document.body.append(t);
+  }
+  return $('ul', t);
+}
+
+async function uploadFiles(dir, files) {
+  const list = uploadTray();
+  const rows = files.map(f => {
+    const bar = h('progress', { max: f.size || 1, value: 0 });
+    const st = h('span', { class: 'muted' }, 'Waiting');
+    list.append(h('li', {}, h('span', { class: 'label' }, f.name), bar, st));
+    return { f, bar, st };
+  });
+  for (const { f, bar, st } of rows) {
+    try {
+      st.textContent = 'Sending';
+      const up = await api('/api/uploads', { method: 'POST', body: { dir, name: f.name, size: f.size, mtime: f.lastModified } });
+      let off = 0, tries = 0;
+      while (off < f.size) {
+        try {
+          const r = await fetch(`/api/uploads/${up.id}?offset=${off}`, { method: 'PUT', headers: { 'X-Burrow': '1' }, body: f.slice(off, Math.min(off + CHUNK, f.size)) });
+          const d = await r.json().catch(() => ({}));
+          if (r.status === 409 && d.offset != null) { off = d.offset; continue; }
+          if (!r.ok) throw Object.assign(new Error(d.error || `Upload failed (${r.status})`), { final: true });
+          off = d.offset; bar.value = off; tries = 0;
+        } catch (x) {
+          // a dropped connection: ask where the upload got to and carry on
+          if (x.final || ++tries > 5) throw x;
+          await new Promise(r => setTimeout(r, 1500 * tries));
+          off = (await api('/api/uploads/' + up.id)).offset;
+        }
+      }
+      const done = await api(`/api/uploads/${up.id}/finish`, { method: 'POST', body: {} });
+      bar.value = f.size || 1;
+      st.textContent = done.name !== f.name ? `Saved as ${done.name}` : 'Done';
+    } catch (x) { st.textContent = x.message; st.className = 'err'; }
+  }
+  route();
+}
+
+function newFolderControl(dir) {
+  const wrap = h('span', { class: 'row' });
+  const btn = h('button', { class: 'btn', type: 'button', onclick: () => {
+    const input = h('input', { placeholder: 'Folder name', 'aria-label': 'New folder name', autocomplete: 'off' });
+    const err = h('span', { class: 'err' });
+    const go = async () => {
+      if (!input.value.trim()) return;
+      try { const e = await api('/api/fs/mkdir', { method: 'POST', body: { path: dir + '/' + input.value.trim() } }); nav({ path: e.path, sel: '' }); } catch (x) { err.textContent = x.message; }
+    };
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') go(); if (e.key === 'Escape') wrap.replaceChildren(btn); });
+    wrap.replaceChildren(input, h('button', { class: 'btn primary', type: 'button', onclick: go }, 'Create'), h('button', { class: 'btn', type: 'button', onclick: () => wrap.replaceChildren(btn) }, 'Cancel'), err);
+    input.focus();
+  } }, icon('plus'), 'New folder');
+  wrap.append(btn);
+  return wrap;
+}
+
+function renameControl(e) {
+  const wrap = h('span', { class: 'row' });
+  const btn = h('button', { class: 'btn', type: 'button', onclick: () => {
+    const input = h('input', { value: e.name, 'aria-label': 'New name', autocomplete: 'off', spellcheck: 'false' });
+    const err = h('span', { class: 'err' });
+    const go = async () => {
+      const name = input.value.trim();
+      if (!name || name === e.name) { wrap.replaceChildren(btn); return; }
+      try {
+        const r = await api('/api/fs/move', { method: 'POST', body: { from: e.path, to: parentOf(e.path) + '/' + name } });
+        panelFor = ''; nav({ sel: r.path }, true);
+      } catch (x) { err.textContent = x.message; }
+    };
+    input.addEventListener('keydown', ev => { if (ev.key === 'Enter') go(); if (ev.key === 'Escape') wrap.replaceChildren(btn); });
+    wrap.replaceChildren(input, h('button', { class: 'btn primary', type: 'button', onclick: go }, 'Rename'), h('button', { class: 'btn', type: 'button', onclick: () => wrap.replaceChildren(btn) }, 'Cancel'), err);
+    input.focus();
+    const dot = e.dir ? -1 : e.name.lastIndexOf('.');
+    input.setSelectionRange(0, dot > 0 ? dot : e.name.length);
+  } }, icon('edit'), 'Rename');
+  wrap.append(btn);
+  return wrap;
+}
+
+function deleteControl(e) {
+  const err = h('span', { class: 'err' });
+  return h('span', { class: 'row' }, h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
+    const b = ev.currentTarget;
+    if (!b.dataset.armed) { b.dataset.armed = '1'; b.lastChild.textContent = 'Move to trash'; return; }
+    try {
+      const [r] = await api('/api/fs/delete', { method: 'POST', body: { paths: [e.path] } });
+      if (!r.ok) throw new Error(r.error);
+      panelFor = ''; nav({ sel: '' }, true);
+    } catch (x) { err.textContent = x.message; }
+  } }, icon('trash'), h('span', {}, 'Delete')), err);
+}
+
+async function viewTrash(s, seq) {
+  const all = ME.admin && s.tab === 'all';
+  const items = await api('/api/trash' + (all ? '?all=1' : ''));
+  if (seq !== routeSeq) return;
+  CURRENT = [];
+  const seg = ME.admin ? h('div', { class: 'seg', role: 'group', 'aria-label': 'Whose' },
+    [['', 'Mine'], ['all', 'Everyone’s']].map(([k, l]) => h('button', { type: 'button', 'aria-pressed': (s.tab || '') === k ? 'true' : 'false', onclick: () => nav({ tab: k }, true) }, l))) : null;
+  put($('#sub'), h('b', {}, 'Recently deleted'), seg, h('span', { class: 'grow' }), h('span', { class: 'muted hide-s' }, 'Kept for 30 days'));
+  if (!items.length) { put($('#content'), emptyState('Nothing deleted in the last 30 days.', 'Deleted files and folders, and older versions replaced by uploads, wait here for 30 days.')); return; }
+  const err = h('p', { class: 'err' });
+  put($('#content'), err, h('table', { class: 'files' },
+    h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', { class: 'r hide-s' }, 'Size'), h('th', {}, 'Deleted'), all ? h('th', { class: 'hide-s' }, 'By') : null, h('th', {}))),
+    h('tbody', {}, items.map(t => h('tr', {},
+      h('td', { class: 'name' }, h('span', {}, icon(t.dir ? 'folder' : 'file', t.dir ? 'k-folder' : ''), h('span', { class: 'label' }, t.name)), h('span', { class: 'where' }, parentOf(t.path))),
+      h('td', { class: 'r num muted hide-s' }, fmtSize(t.size)),
+      h('td', { class: 'muted' }, fmtWhen(t.deleted)),
+      all ? h('td', { class: 'muted hide-s' }, t.user) : null,
+      h('td', { class: 'r' }, h('div', { class: 'row' },
+        h('button', { class: 'btn', type: 'button', onclick: async () => {
+          try { const r = await api(`/api/trash/${t.id}/restore`, { method: 'POST' }); nav({ view: 'browse', path: parentOf(r.path), sel: r.path, tab: '' }); } catch (x) { err.textContent = x.message; }
+        } }, 'Restore'),
+        h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
+          const b = ev.currentTarget;
+          if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Delete forever'; return; }
+          try { await api('/api/trash/' + t.id, { method: 'DELETE' }); route(); } catch (x) { err.textContent = x.message; }
+        } }, 'Delete'))))))));
+}

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No plain HTTP anywhere. Only system certificate authorities (no user-added
+     ones, so a profile's CA can't intercept); Burrow's own self-signed
+     certificate is pinned in code from the pairing QR code. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

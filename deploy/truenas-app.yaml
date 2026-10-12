@@ -14,11 +14,12 @@ services:
     user: "1000:1000"
     ports:
       - "47823:47823"   # the whole app, HTTPS: keep this one on your LAN
-      - "47824:47824"   # share links only, HTTPS: point your reverse proxy here
+      - "47824:47824"   # share links and the phone app, HTTPS: point your reverse proxy here
     environment:
       TZ: UTC
       BURROW_SCAN_HOURS: "6"
     volumes:
       - /mnt/pool/files:/data:ro                # everything Burrow may index; read-only
+      # - /mnt/pool/files/Photos:/data/Photos   # optional: a folder phones and the web UI may write to
       - /mnt/pool/files/Drop:/drop              # where uploads land; inside the library makes them searchable
       - /mnt/pool/apps/burrow/state:/state      # database and thumbnails

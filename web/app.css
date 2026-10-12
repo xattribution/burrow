@@ -95,6 +95,8 @@ form.stack { display: grid; gap: 10px; }
 .checks input { min-height: auto; inline-size: 17px; block-size: 17px; accent-color: var(--accent); }
 .grants { display: grid; gap: 6px; }
 .grant { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; align-items: center; }
+.grant .note { grid-column: 1 / -1; font-size: 13px; color: var(--caution); }
+.grant .note:empty { display: none; }
 .secret { font-family: var(--mono); font-size: 13px; padding: 8px; background: var(--surface); overflow-wrap: anywhere; user-select: all; }
 pre.code { font: 13px/1.5 var(--mono); background: var(--surface); padding: 10px; overflow: auto; margin: 0; }
 
@@ -115,6 +117,13 @@ pre.code { font: 13px/1.5 var(--mono); background: var(--surface); padding: 10px
 .cols .n { font-variant-numeric: tabular-nums; color: var(--ink); }
 .stats { display: flex; flex-wrap: wrap; gap: 8px 28px; font-size: 15px; margin: 4px 0 8px; }
 .stats b { font-size: 22px; font-variant-numeric: tabular-nums; display: block; }
+
+/* uploads in progress */
+.tray { position: fixed; inset: auto 16px 16px auto; z-index: 40; inline-size: min(380px, calc(100vw - 32px)); max-block-size: 50vh; overflow-y: auto; background: var(--paper); border: 1px solid var(--rule); box-shadow: 0 8px 24px oklch(0 0 0 / .2); padding: 8px 12px; }
+.tray ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.tray li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; font-size: 13px; }
+.tray li .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tray progress { grid-column: 1 / -1; inline-size: 100%; block-size: 6px; accent-color: var(--accent); }
 
 /* sign-in and setup */
 .gate { min-block-size: 100vh; display: grid; place-items: center; padding: 24px 16px; }
