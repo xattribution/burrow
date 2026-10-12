@@ -7,6 +7,8 @@
 #   3. Create the state and drop folders first (mkdir -p), owned by that account.
 #   4. Open https://<truenas-ip>:47823 and accept the self-signed certificate. Setup asks
 #      for the key printed in the app's log.
+# Updates are in place: everything Burrow keeps is in the state folder. See "Updating" in
+# the README. To stay on one version, replace :latest with its tag, e.g. :1.0.0.
 services:
   burrow:
     image: ghcr.io/xattribution/burrow:latest

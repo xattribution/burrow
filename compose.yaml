@@ -1,7 +1,14 @@
-# Generic Docker host. install.sh writes a .env next to this file.
+# Generic Docker host. install.sh writes a .env next to this file and replaces this
+# file on `update`. Put your own changes in compose.override.yaml next to it instead:
+# Docker Compose merges it in, and updates never touch it. For example, a folder that
+# phones and the web UI may write to:
+#   services:
+#     burrow:
+#       volumes:
+#         - /path/to/your/files/Photos:/data/Photos
 services:
   burrow:
-    image: ghcr.io/xattribution/burrow:latest
+    image: ghcr.io/xattribution/burrow:${BURROW_TAG:-latest}   # install.sh update <version> pins one
     container_name: burrow
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
@@ -12,6 +19,5 @@ services:
       TZ: ${TZ:-UTC}
     volumes:
       - ${LIBRARY:?set LIBRARY in .env}:/data:ro   # everything Burrow may index; read-only
-      # - /path/to/your/files/Photos:/data/Photos  # optional: a folder phones and the web UI may write to
       - ${DROP:-./drop}:/drop                      # where file-drop uploads land
       - ./state:/state                             # database, thumbnails

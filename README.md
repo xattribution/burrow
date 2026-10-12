@@ -16,18 +16,73 @@ Burrow only speaks HTTPS. Until you give it a certificate it makes its own, so t
 
 | Task | Command |
 |---|---|
-| Update | `curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh \| sudo bash -s -- update` |
+| Update | `curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh \| sudo bash -s -- update` (see [Updating](#updating)) |
 | Uninstall | `curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh \| sudo bash -s -- uninstall` |
 | Back up | `curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh \| sudo bash -s -- backup` |
 | Restore | `curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh \| sudo bash -s -- restore ~/burrow/backups/<file>.db` |
 
-On TrueNAS, update from the Apps page. Back up with:
+On TrueNAS, back up with:
 
 ```bash
 sudo docker exec $(sudo docker ps -qf name=burrow) burrow backup /state/backups/burrow-$(date +%F).db
 ```
 
 The backup holds settings, users, links, link history, API tokens and the change log. The file index rebuilds itself from disk if it is ever lost.
+
+## Updating
+
+Every update is in place. Only the container is replaced. Everything Burrow keeps stays in the state folder: the database (settings, users, links, link history, API tokens, the change log), the TLS certificate and the thumbnails. Your files are never touched. When the new version starts, it upgrades the database by itself. Browser sessions, paired phones, share links and API tokens all carry on, with nothing to set up again.
+
+Each build is also published under its own tag (`sha-<commit>`, and `1.2.3` for releases) at `ghcr.io/xattribution/burrow`, so you can always go back to the version you had. Older versions ignore what newer ones add to the database, so going back keeps your data too. To check which version runs, look at the bottom of **Settings**.
+
+### TrueNAS
+
+1. Back up (the command above).
+2. **Apps → Installed → burrow.** If TrueNAS offers an update for it, choose ⋮ → **Update**.
+3. If it doesn't (TrueNAS doesn't always notice a new image behind `:latest`), pull the image in **System → Shell**:
+   ```bash
+   sudo docker pull ghcr.io/xattribution/burrow:latest
+   ```
+   Then on the Apps page, **Stop** the app and **Start** it again, so it starts from the new image. If **Settings** still shows the old version, open **Edit** and **Save** without changes, which redeploys the app.
+
+To go back: **Edit** the app and change the image line to the version you want, for example `ghcr.io/xattribution/burrow:sha-27c3c4b` or `:1.0.0`, then **Save**. Set it back to `:latest` to follow new versions again.
+
+### Any Docker host (install.sh)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh | sudo bash -s -- update
+```
+
+It backs up the database to `~/burrow/backups/` first, takes the new `compose.yaml`, pulls the new image, restarts Burrow and waits until it answers. Then it prints the old and new versions and the command to go back. Put your own changes to the compose file (a writable folder, other ports) in `compose.override.yaml` next to it. Docker Compose merges that file in, and updates never touch it. If you edited `compose.yaml` itself, the update keeps your file and leaves the new one beside it as `compose.yaml.new`.
+
+To go back or stay on one version, name it: `... | sudo bash -s -- update sha-27c3c4b`. `update latest` follows new versions again. To roll the data back too, restore the backup the update made: `... | sudo bash -s -- restore ~/burrow/backups/<file>-before-update.db`.
+
+### Your own Compose file
+
+In the folder with your compose file:
+
+```bash
+docker exec burrow burrow backup /state/backups/burrow-$(date +%F).db
+docker compose pull && docker compose up -d
+```
+
+To go back, set `image:` to a version tag and run `docker compose up -d` again.
+
+### docker run
+
+Back up, `docker pull ghcr.io/xattribution/burrow:latest`, then `docker stop burrow && docker rm burrow`, and start it again with the same `docker run` command. The state folder must be mounted at `/state` as before, so nothing is lost.
+
+### From source
+
+Stop Burrow, run `git pull && go build -o burrow .`, and start it again with the same `BURROW_STATE`.
+
+### Phones
+
+A server update needs nothing on the phones: paired phones keep working. A new APK, when there is one, is on the [Releases](https://github.com/xattribution/burrow/releases/latest) page and installs over the old one.
+
+### Updating to token settings
+
+The first version with per-token MCP settings keeps every existing API token working as it was, plus one change: every tool now asks before each call in Claude Code. Tokens keep REST API access too. Narrow them under **Settings → MCP and API tokens → Edit**. If you go back to an older version, it ignores token settings, so tokens act without limits there until you update again.
 
 ## What it does
 
