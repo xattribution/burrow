@@ -17,6 +17,14 @@ open class BurrowApp : Application(), SingletonImageLoader.Factory {
         graph = AppGraph(this, keyWrapper())
         graph.notifications.createChannels()
         graph.scheduler.reschedule()
+        Thread { tidyCache() }.start()
+    }
+
+    /** Files opened in other apps are kept a day; copies waiting to upload, a week. */
+    private fun tidyCache() {
+        val now = System.currentTimeMillis()
+        cacheDir.resolve("open").listFiles()?.filter { now - it.lastModified() > 86_400_000 }?.forEach { it.delete() }
+        cacheDir.resolve("outbox").listFiles()?.filter { now - it.lastModified() > 7 * 86_400_000L }?.forEach { it.deleteRecursively() }
     }
 
     /** Where the device key is sealed: the Android Keystore (tests swap it out). */

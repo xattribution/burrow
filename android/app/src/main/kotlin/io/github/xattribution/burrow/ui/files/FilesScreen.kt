@@ -160,7 +160,17 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
     var searching by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var newFolder by remember { mutableStateOf(false) }
+    var shareFolder by remember { mutableStateOf(false) }
     val canWrite = (listing as? Load.Ready)?.value?.canWrite == true
+    val canShare = (listing as? Load.Ready)?.value?.canShare == true
+    // opening a folder from search results leaves search
+    val open: (Entry) -> Unit = { e ->
+        if (e.dir && searching) {
+            searching = false
+            vm.search("")
+        }
+        onOpen(e)
+    }
 
     LaunchedEffect(message) {
         message?.let { snack.showSnackbar(it); vm.message.value = null }
@@ -222,6 +232,7 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
                                 DropdownMenuItem(text = { Text("Upload files here") }, leadingIcon = { Icon(Icons.Outlined.Upload, null) }, onClick = { menu = false; pick.launch(arrayOf("*/*")) })
                                 DropdownMenuItem(text = { Text("New folder") }, leadingIcon = { Icon(Icons.Outlined.CreateNewFolder, null) }, onClick = { menu = false; newFolder = true })
                             }
+                            if (canShare) DropdownMenuItem(text = { Text("Share link to this folder") }, leadingIcon = { Icon(Icons.Outlined.Link, null) }, onClick = { menu = false; shareFolder = true })
                             DropdownMenuItem(text = { Text("Refresh") }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) }, onClick = { menu = false; vm.refresh() })
                         }
                     },
@@ -239,7 +250,7 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
                     is Load.Loading -> Busy()
                     is Load.Failed -> EmptyState(Icons.Outlined.WifiOff, r.message, action = "Try again") { vm.search(query) }
                     is Load.Ready -> if (r.value.entries.isEmpty()) EmptyState(Icons.Outlined.SearchOff, "Nothing matches “$query”", "Every word has to appear somewhere in the path.")
-                    else EntryList(r.value.entries, grid = false, selected = selected, showWhere = true, onOpen = onOpen)
+                    else EntryList(r.value.entries, grid = false, selected = selected, showWhere = true, onOpen = open)
                 }
                 searching -> EmptyState(Icons.Outlined.Search, "Search Burrow", "Type part of any file or folder name. ext:pdf and type:video narrow it down.")
                 else -> when (val l = listing) {
@@ -247,15 +258,16 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
                     is Load.Failed -> EmptyState(Icons.Outlined.WifiOff, l.message, action = "Try again") { vm.refresh() }
                     is Load.Ready -> Column {
                         if (path.isNotEmpty()) Crumbs(path) { vm.open(it) }
-                        if (path.isEmpty() && favorites.isNotEmpty()) Favorites(favorites, onOpen)
+                        if (path.isEmpty() && favorites.isNotEmpty()) Favorites(favorites, open)
                         if (l.value.entries.isEmpty()) {
                             EmptyState(Icons.Outlined.Folder, if (path.isEmpty()) "No folders yet" else "This folder is empty", if (path.isEmpty()) "Ask an admin to give you access to a folder." else if (canWrite) "Upload files or drag them here." else null)
-                        } else EntryList(l.value.entries, grid = grid, selected = selected, showWhere = false, onOpen = onOpen)
+                        } else EntryList(l.value.entries, grid = grid, selected = selected, showWhere = false, onOpen = open)
                     }
                 }
             }
         }
     }
+    if (shareFolder) io.github.xattribution.burrow.ui.links.NewLinkSheet(path = path, onDismiss = { shareFolder = false }, onCreated = { vm.refresh() })
     if (newFolder) {
         var name by remember { mutableStateOf("") }
         AlertDialog(
