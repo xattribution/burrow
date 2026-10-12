@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "burrow-android"
-include(":shared")
+include(":shared", ":app")

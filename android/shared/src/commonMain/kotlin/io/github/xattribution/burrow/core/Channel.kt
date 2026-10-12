@@ -120,6 +120,11 @@ class BurrowChannel(
     /** Forgets the session (after the app was in the background for long, say). */
     suspend fun reset() = lock.withLock { live = null }
 
+    /** Forgets which address worked (the phone changed networks); the next request tries them in order. */
+    fun forgetRoute() {
+        base = null
+    }
+
     private suspend fun postAnywhere(path: String, body: OutgoingBody): IncomingResponse {
         val tried = mutableListOf<String>()
         val order = (listOfNotNull(base) + routes.candidates()).distinct()

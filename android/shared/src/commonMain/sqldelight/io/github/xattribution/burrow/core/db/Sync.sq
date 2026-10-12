@@ -1,2 +1,0 @@
--- placeholder, replaced by the sync engine schema
-CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY NOT NULL, v TEXT NOT NULL);

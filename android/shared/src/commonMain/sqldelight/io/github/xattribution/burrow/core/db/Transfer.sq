@@ -1,0 +1,38 @@
+-- One-off uploads and downloads started by hand (share to Burrow, Upload here,
+-- Save to phone). They survive the app closing and resume where they stopped.
+CREATE TABLE transfer (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  direction TEXT NOT NULL,
+  local_uri TEXT NOT NULL,
+  remote_dir TEXT NOT NULL,
+  name TEXT NOT NULL,
+  size INTEGER NOT NULL DEFAULT -1,
+  mtime INTEGER NOT NULL DEFAULT 0,
+  done_bytes INTEGER NOT NULL DEFAULT 0,
+  upload_id TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT 'queued',
+  result TEXT NOT NULL DEFAULT '',
+  created INTEGER NOT NULL,
+  updated INTEGER NOT NULL
+);
+
+queue:
+INSERT INTO transfer(direction, local_uri, remote_dir, name, size, mtime, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+next:
+SELECT * FROM transfer WHERE state IN ('queued', 'running') ORDER BY id LIMIT 1;
+
+recent:
+SELECT * FROM transfer ORDER BY id DESC LIMIT ?;
+
+progress:
+UPDATE transfer SET done_bytes = ?, upload_id = ?, state = 'running', updated = ? WHERE id = ?;
+
+finish:
+UPDATE transfer SET state = ?, result = ?, done_bytes = ?, updated = ? WHERE id = ?;
+
+clearDone:
+DELETE FROM transfer WHERE state IN ('done', 'failed', 'cancelled');
+
+cancel:
+UPDATE transfer SET state = 'cancelled', updated = ? WHERE id = ? AND state IN ('queued', 'running');
