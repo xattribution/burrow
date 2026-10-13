@@ -44,28 +44,48 @@ type certSource struct {
 	certFile, keyFile string
 	mu                sync.Mutex
 	cert              *tls.Certificate
-	stamp             string    // size+mtime of both files when loaded
+	stamp             string    // contentStamp of both files when loaded
 	checked           time.Time // last time the files were looked at
 }
 
+// contentStamp fingerprints the files' contents. Size and mtime aren't enough: two
+// writes in the same clock tick can leave both unchanged. The files are small.
+func contentStamp(contents ...[]byte) string {
+	h := sha256.New()
+	for _, b := range contents {
+		fmt.Fprintf(h, "%d:", len(b))
+		h.Write(b)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 func fileStamp(paths ...string) string {
-	var b strings.Builder
+	var contents [][]byte
 	for _, p := range paths {
-		fi, err := os.Stat(p)
+		b, err := os.ReadFile(p)
 		if err != nil {
 			return ""
 		}
-		fmt.Fprintf(&b, "%d.%d|", fi.Size(), fi.ModTime().UnixNano())
+		contents = append(contents, b)
 	}
-	return b.String()
+	return contentStamp(contents...)
 }
 
+// load reads both files once, so the stamp describes exactly the certificate loaded.
 func (c *certSource) load() error {
-	cert, err := tls.LoadX509KeyPair(c.certFile, c.keyFile)
+	certPEM, err := os.ReadFile(c.certFile)
 	if err != nil {
 		return err
 	}
-	c.cert, c.stamp = &cert, fileStamp(c.certFile, c.keyFile)
+	keyPEM, err := os.ReadFile(c.keyFile)
+	if err != nil {
+		return err
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return err
+	}
+	c.cert, c.stamp = &cert, contentStamp(certPEM, keyPEM)
 	return nil
 }
 

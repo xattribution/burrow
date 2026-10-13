@@ -188,35 +188,55 @@ func (a *App) sessionUser(r *http.Request) *User {
 	return a.activeUser(uid)
 }
 
-// tokenUser checks a bearer token (MCP clients, scripts, paired phones).
-func (a *App) tokenUser(r *http.Request) (*User, int64) {
+// tokenAuth is a bearer token that checked out.
+type tokenAuth struct {
+	id    int64
+	scope TokenScope
+}
+
+// tokenUser checks a bearer token (MCP clients, scripts) and returns its user,
+// narrowed to what the token's scope allows.
+func (a *App) tokenUser(r *http.Request) (*User, *tokenAuth) {
 	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || strings.TrimSpace(tok) == "" {
-		return nil, 0
+		return nil, nil
 	}
 	var id, uid, last int64
-	var lastIP string
-	if err := a.st.db.QueryRow(`SELECT id,user_id,coalesce(last_used,0),last_ip FROM tokens WHERE hash=?`, sha(strings.TrimSpace(tok))).Scan(&id, &uid, &last, &lastIP); err != nil {
-		return nil, 0
+	var lastIP, scope string
+	if err := a.st.db.QueryRow(`SELECT id,user_id,coalesce(last_used,0),last_ip,scope FROM tokens WHERE hash=?`, sha(strings.TrimSpace(tok))).Scan(&id, &uid, &last, &lastIP, &scope); err != nil {
+		return nil, nil
 	}
 	u := a.activeUser(uid)
 	if u == nil {
-		return nil, 0
+		return nil, nil
 	}
 	// Record use at most once a minute: clients like MCP and the phone app make many
 	// requests, and a database write on each one would serialize them for nothing.
 	if ip := a.clientIP(r); now()-last >= 60 || ip != lastIP {
 		_, _ = a.st.exec(`UPDATE tokens SET last_used=?, last_ip=? WHERE id=?`, now(), ip, id)
 	}
-	return u, id
+	ta := &tokenAuth{id: id, scope: parseScope(scope)}
+	return a.narrow(u, ta.scope), ta
+}
+
+// apiTokenUser is tokenUser for the REST API: tokens made for MCP only don't count.
+func (a *App) apiTokenUser(r *http.Request) (*User, *tokenAuth) {
+	if u, ta := a.tokenUser(r); u != nil && ta.scope.API {
+		return u, ta
+	}
+	return nil, nil
 }
 
 // requireUser guards the normal API for any signed-in user or token. Cookie-authenticated
 // requests that change state must carry X-Burrow: 1, which a cross-site form cannot send.
 func (a *App) requireUser(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if u, tid := a.tokenUser(r); u != nil {
-			next(w, withAuth(r, authInfo{user: u, viaAPI: true, tokenID: tid}))
+		if u, ta := a.tokenUser(r); u != nil {
+			if !ta.scope.API {
+				httpErr(w, http.StatusForbidden, "this token is for MCP only (Settings > MCP and API tokens)")
+				return
+			}
+			next(w, withAuth(r, authInfo{user: u, viaAPI: true, tokenID: ta.id}))
 			return
 		}
 		u := a.sessionUser(r)

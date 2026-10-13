@@ -102,11 +102,15 @@ func (a *App) shareableItem(u *User, p string) (string, error) {
 }
 
 // addItems adds library paths to a shared folder. Each one must be shareable by the
-// link's owner (an admin editing someone else's link can't add more than they could).
-func (a *App) addItems(owner *User, id string, paths []string) error {
+// link's owner (an admin editing someone else's link can't add more than they could),
+// and by whoever is adding it (a token can't add what its scope doesn't reach).
+func (a *App) addItems(owner *User, id string, paths []string, by *User) error {
 	var rels []string
 	for _, p := range paths {
 		rel, err := a.shareableItem(owner, p)
+		if err == nil && by != owner {
+			_, err = a.shareableItem(by, p)
+		}
 		if err != nil {
 			return err
 		}
@@ -410,7 +414,7 @@ func (a *App) apiAddItems(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "this link's owner is no longer active")
 		return
 	}
-	if err := a.addItems(owner, s.ID, in.Paths); err != nil {
+	if err := a.addItems(owner, s.ID, in.Paths, userOf(r)); err != nil {
 		httpErr(w, 400, err.Error())
 		return
 	}

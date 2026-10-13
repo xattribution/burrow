@@ -170,6 +170,8 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("GET /api/tokens", ses(a.apiTokens))
 	mux.HandleFunc("POST /api/tokens", ses(a.apiNewToken))
 	mux.HandleFunc("DELETE /api/tokens/{id}", ses(a.apiDelToken))
+	mux.HandleFunc("PATCH /api/tokens/{id}", ses(a.apiPatchToken))
+	mux.HandleFunc("GET /api/tokens/tools", ses(a.apiTokenTools))
 	mux.HandleFunc("GET /api/users", admSes(a.apiUsers))
 	mux.HandleFunc("POST /api/users", admSes(a.apiCreateUser))
 	mux.HandleFunc("PATCH /api/users/{id}", admSes(a.apiPatchUser))
@@ -510,7 +512,7 @@ func (a *App) apiRootsAvailable(w http.ResponseWriter, r *http.Request) {
 	if a.setupDone() {
 		u := a.sessionUser(r)
 		if u == nil {
-			u, _ = a.tokenUser(r)
+			u, _ = a.apiTokenUser(r)
 		}
 		if u == nil {
 			httpErr(w, 401, "sign in required")
@@ -1009,51 +1011,6 @@ func (a *App) apiPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	a.dropSessions(u.ID) // sign out everywhere else
 	a.newSession(w, r, u.ID)
-	writeJSON(w, map[string]bool{"ok": true})
-}
-
-// ---- API tokens (each belongs to, and acts as, the user who made it) ----
-
-func (a *App) apiTokens(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.st.db.Query(`SELECT id,name,created,last_used,last_ip FROM tokens WHERE user_id=? ORDER BY id DESC`, userOf(r).ID)
-	if err != nil {
-		httpErr(w, 500, err.Error())
-		return
-	}
-	defer rows.Close()
-	type tok struct {
-		ID       int64  `json:"id"`
-		Name     string `json:"name"`
-		Created  int64  `json:"created"`
-		LastUsed int64  `json:"last_used"`
-		LastIP   string `json:"last_ip"`
-	}
-	out := []tok{}
-	for rows.Next() {
-		var t tok
-		_ = rows.Scan(&t.ID, &t.Name, &t.Created, &t.LastUsed, &t.LastIP)
-		out = append(out, t)
-	}
-	writeJSON(w, out)
-}
-
-func (a *App) apiNewToken(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Name string }
-	_ = readJSON(r, &in)
-	name := strings.TrimSpace(in.Name)
-	if name == "" {
-		name = "token"
-	}
-	tok := "brw_" + randToken(24)
-	if _, err := a.st.exec(`INSERT INTO tokens(name,hash,created,user_id) VALUES(?,?,?,?)`, trunc(name, 80), sha(tok), now(), userOf(r).ID); err != nil {
-		httpErr(w, 500, err.Error())
-		return
-	}
-	writeJSON(w, map[string]string{"token": tok, "name": name, "mcp_url": a.baseURL(r) + "/mcp"})
-}
-
-func (a *App) apiDelToken(w http.ResponseWriter, r *http.Request) {
-	_, _ = a.st.exec(`DELETE FROM tokens WHERE id=? AND user_id=?`, r.PathValue("id"), userOf(r).ID)
 	writeJSON(w, map[string]bool{"ok": true})
 }
 

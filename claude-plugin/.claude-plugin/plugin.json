@@ -1,0 +1,28 @@
+{
+  "name": "burrow",
+  "displayName": "Burrow",
+  "version": "1.1.0",
+  "description": "Search, read, share and organize the files on your Burrow NAS from Claude Code, approving each call: the Burrow MCP tools plus /burrow:find, /burrow:share, /burrow:links, /burrow:changes and /burrow:drop.",
+  "author": {
+    "name": "xattribution",
+    "url": "https://github.com/xattribution"
+  },
+  "homepage": "https://github.com/xattribution/burrow/tree/main/claude-plugin",
+  "repository": "https://github.com/xattribution/burrow",
+  "keywords": ["burrow", "nas", "files", "search", "share-links", "self-hosted", "mcp"],
+  "userConfig": {
+    "mcp_url": {
+      "type": "string",
+      "title": "Burrow MCP endpoint",
+      "description": "Your Burrow's MCP address, shown under Settings → MCP and API tokens, for example https://share.example.com/mcp. On the public address, also tick Settings → Public port → Also serve MCP.",
+      "required": true
+    },
+    "api_token": {
+      "type": "string",
+      "title": "Burrow API token",
+      "description": "A token from Settings → MCP and API tokens (it starts with brw_). Claude sees and shares exactly what the account that made it can.",
+      "required": true,
+      "sensitive": true
+    }
+  }
+}

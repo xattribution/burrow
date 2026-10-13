@@ -62,6 +62,7 @@ func migrateUsers(db *sql.DB) error {
 		`ALTER TABLE sessions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE tokens ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE tokens ADD COLUMN last_ip TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE tokens ADD COLUMN scope TEXT NOT NULL DEFAULT ''`, // '' = made before scopes: every tool, the API too
 		`ALTER TABLE shares ADD COLUMN owner_id INTEGER NOT NULL DEFAULT 1`,
 	} {
 		_, _ = db.Exec(q) // "duplicate column" means already applied
@@ -145,6 +146,7 @@ type User struct {
 	totp     string
 	pending  string
 	recovery []string
+	lim      *tokenLimit // set when the request came through a scoped API token
 }
 
 type perm int
@@ -284,7 +286,7 @@ func (u *User) grantFor(rel string) (Grant, bool) {
 
 // can reports whether the user may do p on rel itself.
 func (u *User) can(rel string, p perm) bool {
-	if u == nil || u.Disabled {
+	if u == nil || u.Disabled || !u.lim.allows(p) || !u.lim.covers(rel) {
 		return false
 	}
 	if u.Admin {
@@ -300,31 +302,56 @@ func (u *User) canReach(rel string, p perm) bool {
 	if u.can(rel, p) {
 		return true
 	}
-	if u == nil || u.Disabled {
+	if u == nil || u.Disabled || !u.lim.allows(p) {
 		return false
 	}
+	below := func(t string) bool { return rel == "" || strings.HasPrefix(t, rel+"/") }
+	// a token limited to some folders can walk down to each of them
+	for _, f := range u.lim.folderList() {
+		if below(f) && u.canReach(f, p) {
+			return true
+		}
+	}
 	for _, g := range u.Grants {
-		if g.has(p) && (rel == "" || strings.HasPrefix(g.Path, rel+"/")) {
+		if g.has(p) && below(g.Path) && u.lim.covers(g.Path) {
 			return true
 		}
 	}
 	return false
 }
 
+// insidePath is an SQL condition: col is path p or something inside it.
+func insidePath(col, p string) (string, []any) {
+	return "(" + col + " = ? OR (" + col + " >= ? AND " + col + " < ?))", []any{p, p + "/", p + "0"}
+}
+
 // scope returns an SQL condition on col (a library-path column) that is true exactly
-// where u.can(path, p). For each grant that gives p, the path is inside it and not
-// inside a more specific grant that doesn't. Since the most specific covering grant
-// decides, this is exact, including an allow inside a carve-out inside an allow.
+// where u.can(path, p): the grants' condition, narrowed to a token's folders.
 func (u *User) scope(col string, p perm) (string, []any) {
+	cond, args := u.grantScope(col, p)
+	if u == nil || u.lim == nil || cond == "0" {
+		return cond, args
+	}
+	if !u.lim.allows(p) {
+		return "0", nil
+	}
+	if fc, fargs := u.lim.foldersCond(col); fc != "" {
+		return "(" + cond + " AND " + fc + ")", append(args, fargs...)
+	}
+	return cond, args
+}
+
+// grantScope is the grants' part of scope. For each grant that gives p, the path is
+// inside it and not inside a more specific grant that doesn't. Since the most specific
+// covering grant decides, this is exact, including an allow inside a carve-out inside an allow.
+func (u *User) grantScope(col string, p perm) (string, []any) {
 	if u == nil || u.Disabled {
 		return "0", nil
 	}
 	if u.Admin {
 		return "1", nil
 	}
-	inside := func(g string) (string, []any) {
-		return "(" + col + " = ? OR (" + col + " >= ? AND " + col + " < ?))", []any{g, g + "/", g + "0"}
-	}
+	inside := func(g string) (string, []any) { return insidePath(col, g) }
 	var ors []string
 	var args []any
 	for _, g := range u.Grants {
@@ -359,7 +386,8 @@ type authInfo struct {
 	user     *User
 	viaAPI   bool // bearer token or paired device, not a browser session
 	tokenID  int64
-	deviceID string // set for requests from a paired device
+	deviceID string      // set for requests from a paired device
+	scope    *TokenScope // set for MCP requests: the token's scope
 }
 
 func withAuth(r *http.Request, ai authInfo) *http.Request {

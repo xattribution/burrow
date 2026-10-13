@@ -16,18 +16,73 @@ Burrow only speaks HTTPS. Until you give it a certificate it makes its own, so t
 
 | Task | Command |
 |---|---|
-| Update | `curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh \| sudo bash -s -- update` |
+| Update | `curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh \| sudo bash -s -- update` (see [Updating](#updating)) |
 | Uninstall | `curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh \| sudo bash -s -- uninstall` |
 | Back up | `curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh \| sudo bash -s -- backup` |
 | Restore | `curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh \| sudo bash -s -- restore ~/burrow/backups/<file>.db` |
 
-On TrueNAS, update from the Apps page. Back up with:
+On TrueNAS, back up with:
 
 ```bash
 sudo docker exec $(sudo docker ps -qf name=burrow) burrow backup /state/backups/burrow-$(date +%F).db
 ```
 
 The backup holds settings, users, links, link history, API tokens and the change log. The file index rebuilds itself from disk if it is ever lost.
+
+## Updating
+
+Every update is in place. Only the container is replaced. Everything Burrow keeps stays in the state folder: the database (settings, users, links, link history, API tokens, the change log), the TLS certificate and the thumbnails. Your files are never touched. When the new version starts, it upgrades the database by itself. Browser sessions, paired phones, share links and API tokens all carry on, with nothing to set up again.
+
+Each build is also published under its own tag (`sha-<commit>`, and `1.2.3` for releases) at `ghcr.io/xattribution/burrow`, so you can always go back to the version you had. Older versions ignore what newer ones add to the database, so going back keeps your data too. To check which version runs, look at the bottom of **Settings**.
+
+### TrueNAS
+
+1. Back up (the command above).
+2. **Apps → Installed → burrow.** If TrueNAS offers an update for it, choose ⋮ → **Update**.
+3. If it doesn't (TrueNAS doesn't always notice a new image behind `:latest`), pull the image in **System → Shell**:
+   ```bash
+   sudo docker pull ghcr.io/xattribution/burrow:latest
+   ```
+   Then on the Apps page, **Stop** the app and **Start** it again, so it starts from the new image. If **Settings** still shows the old version, open **Edit** and **Save** without changes, which redeploys the app.
+
+To go back: **Edit** the app and change the image line to the version you want, for example `ghcr.io/xattribution/burrow:sha-27c3c4b` or `:1.0.0`, then **Save**. Set it back to `:latest` to follow new versions again.
+
+### Any Docker host (install.sh)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xattribution/burrow/main/install.sh | sudo bash -s -- update
+```
+
+It backs up the database to `~/burrow/backups/` first, takes the new `compose.yaml`, pulls the new image, restarts Burrow and waits until it answers. Then it prints the old and new versions and the command to go back. Put your own changes to the compose file (a writable folder, other ports) in `compose.override.yaml` next to it. Docker Compose merges that file in, and updates never touch it. If you edited `compose.yaml` itself, the update keeps your file and leaves the new one beside it as `compose.yaml.new`.
+
+To go back or stay on one version, name it: `... | sudo bash -s -- update sha-27c3c4b`. `update latest` follows new versions again. To roll the data back too, restore the backup the update made: `... | sudo bash -s -- restore ~/burrow/backups/<file>-before-update.db`.
+
+### Your own Compose file
+
+In the folder with your compose file:
+
+```bash
+docker exec burrow burrow backup /state/backups/burrow-$(date +%F).db
+docker compose pull && docker compose up -d
+```
+
+To go back, set `image:` to a version tag and run `docker compose up -d` again.
+
+### docker run
+
+Back up, `docker pull ghcr.io/xattribution/burrow:latest`, then `docker stop burrow && docker rm burrow`, and start it again with the same `docker run` command. The state folder must be mounted at `/state` as before, so nothing is lost.
+
+### From source
+
+Stop Burrow, run `git pull && go build -o burrow .`, and start it again with the same `BURROW_STATE`.
+
+### Phones
+
+A server update needs nothing on the phones: paired phones keep working. A new APK, when there is one, is on the [Releases](https://github.com/xattribution/burrow/releases/latest) page and installs over the old one.
+
+### Updating to token settings
+
+The first version with per-token MCP settings keeps every existing API token working as it was, plus one change: every tool now asks before each call in Claude Code. Tokens keep REST API access too. Narrow them under **Settings → MCP and API tokens → Edit**. If you go back to an older version, it ignores token settings, so tokens act without limits there until you update again.
 
 ## What it does
 
@@ -43,7 +98,7 @@ The backup holds settings, users, links, link history, API tokens and the change
 - **Activity** has two logs. One records files added, modified and deleted, kept for 180 days. The other records every link open, download, upload and wrong password, with the visitor's IP. Each user sees changes in their folders and activity on their own links.
 - **Overview** charts size by library, size by file type and changes per day, counting only what you can see.
 - **Favorites** pin files and folders to your sidebar.
-- **MCP** endpoint at `/mcp` with tools for search, listing folders, file info, reading text files, recent changes, creating share links and file drops, listing and revoking links, and index status. Tools act as the user who made the token.
+- **MCP** endpoint at `/mcp` with tools for search, listing folders, file info, reading text files, recent changes, share links, shared folders and file drops, new folders, writing text files, moving, deleting to the trash, and index status. Tools act as the user who made the token, and each token sets which tools it offers, which folders it reaches, and whether Claude Code must ask before every call.
 
 ## Measured performance
 
@@ -164,7 +219,7 @@ The container's user needs write permission on that folder. Deleted files move t
 
 ## Connecting an LLM
 
-Create a token in **Settings → MCP and API tokens**. Burrow shows the token once, together with a ready-made client config:
+Create a token in **Settings → MCP and API tokens → New token**. Burrow shows the token once, together with a ready-made client config:
 
 ```json
 {
@@ -178,7 +233,37 @@ Create a token in **Settings → MCP and API tokens**. Burrow shows the token on
 }
 ```
 
-A token can see and share exactly what the account that made it can, and nothing more. Make a separate user with narrower folder access if you want an LLM to see less than you do. Delete the token in Settings to cut access. MCP is reachable on the LAN port, and on the public port only if you turn that on under **Settings → Public port**.
+A token never reaches further than the account that made it, and you can narrow it further when you create it or later with **Edit**:
+
+| Setting | Choices |
+|---|---|
+| Tools | Each tool **Off**, **Ask** or **On**, grouped as read, share, edit and admin, with presets: Read only, Read and share, Everything, Nothing. New tokens start at Read and share, all on Ask. |
+| Folders | Every folder the account can see, or only the folders you list. Search, previews, links, the change log and edits all stay inside them, and the token sees only links that point there. |
+| REST API | Off by default: the token works only at `/mcp`. On: scripts can use it too, with the same folders, and sharing or editing only if it offers a share or edit tool. |
+
+**Ask** marks the tool so Claude Code asks you before every call, in every permission mode (auto and bypass included), with no "don't ask again". Other MCP clients may treat it like **On**, which leaves the decision to the client's own permission settings. A token without the admin tools has no admin powers, even when an admin made it. Tokens made before these settings existed offer every tool on **Ask** and keep REST API access.
+
+Delete the token in Settings to cut access. MCP is reachable on the LAN port, and on the public port only if you turn that on under **Settings → Public port**.
+
+### Claude Code plugin
+
+For Claude Code, install the plugin instead of pasting the config:
+
+```
+/plugin install burrow --marketplace xattribution/burrow
+```
+
+It asks for the MCP endpoint and a token, and keeps the token in your system's credential store rather than a settings file. It also adds a hook that asks you before every Burrow call, on top of the token's **Ask** settings. Besides the tools, it adds five commands:
+
+| Command | What it does |
+|---|---|
+| `/burrow:find <description>` | Finds files from a plain description |
+| `/burrow:share <what> [options]` | Makes a link: "the 2024 tax folder for mom, one week, with a password" |
+| `/burrow:links` | Lists your links, flags the exposed ones, turns off the ones you pick |
+| `/burrow:changes [span] [folder]` | Summarizes what changed |
+| `/burrow:drop <name>` | Makes an upload-only link (admins only) |
+
+Or just ask: "find the bracket STL I changed last week and give me a link to it". See [`claude-plugin`](claude-plugin/README.md).
 
 ## Configuration
 
@@ -224,6 +309,7 @@ Folders named `.zfs`, `@eaDir`, `#recycle`, `.Trash-*`, `$RECYCLE.BIN` and a few
 - **Accounts:**
   - Two-factor sign-in with authenticator-app codes is available to every user. Turning it on needs the password, each code works once, and you get 10 single-use recovery codes.
   - API tokens can't change passwords, 2FA, tokens, settings or users.
+  - Each token is narrowed to its own tools and folders on every request, MCP and REST alike: the narrowing is applied to the account it acts as, so every permission check that guards the web UI guards the token too.
   - The database (password hashes, 2FA secrets) is readable by Burrow's user only.
 - **Recovery:** an admin can set a new password under **Users**, which also revokes that user's API tokens. If you lose the only admin password, run `docker exec <container> burrow reset-password <username> --admin`. It prints a temporary password, turns off that user's 2FA, revokes their tokens and makes them an admin. Links and settings are kept.
 

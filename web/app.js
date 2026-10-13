@@ -872,17 +872,20 @@ async function viewUsers(s, seq) {
       h('td', {}, h('span', { class: 'state ' + (u.disabled ? 'revoked' : 'active') }, u.disabled ? 'Turned off' : 'Active')))))));
 }
 
+// folderSuggest fills a datalist with folders matching q (the libraries when q is empty).
+async function folderSuggest(options, q) {
+  try {
+    const paths = q ? (await api('/api/search?' + new URLSearchParams({ q, kind: 'folder', limit: 20 }))).entries.map(e => e.path) : LIBS.map(l => l.path);
+    options.replaceChildren(...paths.map(p => h('option', { value: p })));
+  } catch { /* suggestions are optional */ }
+}
+
 // grantsEditor edits a user's folder access: one row per folder, most specific wins.
 function grantsEditor(grants) {
   const list = h('div', { class: 'grants' });
   const options = h('datalist', { id: 'folder-options' });
   let t = null;
-  const suggest = async q => {
-    try {
-      const paths = q ? (await api('/api/search?' + new URLSearchParams({ q, kind: 'folder', limit: 20 }))).entries.map(e => e.path) : LIBS.map(l => l.path);
-      options.replaceChildren(...paths.map(p => h('option', { value: p })));
-    } catch { /* suggestions are optional */ }
-  };
+  const suggest = q => folderSuggest(options, q);
   const addRow = (g = { path: '', read: true, share: false }) => {
     const path = h('input', { value: g.path, list: 'folder-options', class: 'mono', placeholder: 'Folder, e.g. DOCUMENTS/Taxes', 'aria-label': 'Folder', autocomplete: 'off', spellcheck: 'false',
       oninput: e => { clearTimeout(t); t = setTimeout(() => suggest(e.target.value.trim()), 150); }, onfocus: e => suggest(e.target.value.trim()) });
@@ -977,11 +980,145 @@ async function openUserPanel(id) {
   if (isNew) f.username.focus();
 }
 
+// ---------- API tokens ----------
+// Each token offers a chosen set of MCP tools (each Off, Ask or On), in every folder
+// the account can see or only in some, and the REST API only if scripts need it.
+const TOOL_GROUPS = [['read', 'Read'], ['share', 'Share'], ['edit', 'Edit'], ['admin', 'Admin']];
+const TOOL_MODES = [['off', 'Off'], ['ask', 'Ask'], ['on', 'On']];
+const TOKEN_PRESETS = [['Read only', ['read']], ['Read and share', ['read', 'share']], ['Everything', ['read', 'share', 'edit', 'admin']], ['Nothing', []]];
+const toolMode = (sc, name) => sc.tools[name] || 'off';
+
+function scopeSummary(sc, tools) {
+  const on = tools.filter(t => toolMode(sc, t.name) !== 'off');
+  if (!on.length) return 'Nothing';
+  const preset = TOKEN_PRESETS.find(([, gs]) => tools.every(t => gs.includes(t.group) === (toolMode(sc, t.name) !== 'off')));
+  const asks = on.filter(t => toolMode(sc, t.name) === 'ask').length;
+  return [preset ? preset[0] : `${on.length} of ${tools.length} tools`,
+    sc.folders.length ? sc.folders.join(', ') : 'every folder',
+    asks === on.length ? 'asks before every call' : asks ? 'asks before some calls' : 'doesn’t ask',
+    sc.api ? 'REST API too' : null].filter(Boolean).join(' · ');
+}
+
+// folderListEditor edits a list of folders, with the same suggestions as folder access.
+function folderListEditor(paths) {
+  const list = h('div', { class: 'grants' });
+  const options = h('datalist', { id: 'token-folder-options' });
+  let t = null;
+  const add = (p = '') => {
+    const input = h('input', { value: p, list: 'token-folder-options', class: 'mono', placeholder: 'Folder, e.g. DOCUMENTS/Taxes', 'aria-label': 'Folder', autocomplete: 'off', spellcheck: 'false',
+      oninput: e => { clearTimeout(t); t = setTimeout(() => folderSuggest(options, e.target.value.trim()), 150); }, onfocus: e => folderSuggest(options, e.target.value.trim()) });
+    const row = h('div', { class: 'grant folder' }, input, h('button', { type: 'button', class: 'iconbtn', 'aria-label': 'Remove folder', title: 'Remove', onclick: () => row.remove() }, icon('x')));
+    list.append(row);
+    return input;
+  };
+  paths.forEach(p => add(p));
+  const read = () => [...list.querySelectorAll('input')].map(i => i.value.trim()).filter(Boolean);
+  const el = h('div', { class: 'stack' }, list, options, h('div', { class: 'row' }, h('button', { type: 'button', class: 'btn', onclick: () => add().focus() }, 'Add folder')));
+  return { el, read, add };
+}
+
+function tokenPanel(tok, tools, mcpURL, changed) {
+  const isNew = !tok;
+  const sc = isNew ? { tools: {}, folders: [], api: false } : { ...tok.scope, tools: { ...tok.scope.tools } };
+  if (isNew) tools.forEach(t => { if (t.group === 'read' || t.group === 'share') sc.tools[t.name] = 'ask'; });
+  const err = h('p', { class: 'err' });
+  const saved = h('span', { class: 'saved' });
+  const name = h('input', { name: 'name', value: isNew ? '' : tok.name, placeholder: 'e.g. Claude Code', required: true, autocomplete: 'off' });
+
+  const redraw = {};
+  const modeSeg = t => {
+    const el = h('div', { class: 'seg', role: 'group', 'aria-label': t.name });
+    redraw[t.name] = () => put(el, TOOL_MODES.map(([v, l]) => h('button', { type: 'button', 'aria-pressed': toolMode(sc, t.name) === v ? 'true' : 'false',
+      onclick: () => { sc.tools[t.name] = v; redraw[t.name](); } }, l)));
+    redraw[t.name]();
+    return el;
+  };
+  const presets = h('div', { class: 'row' }, TOKEN_PRESETS.map(([label, gs]) => h('button', { type: 'button', class: 'btn',
+    onclick: () => tools.forEach(t => { sc.tools[t.name] = gs.includes(t.group) ? 'ask' : 'off'; redraw[t.name](); }) }, label)));
+  const toolList = h('div', { class: 'tools' }, TOOL_GROUPS.filter(([g]) => tools.some(t => t.group === g)).map(([g, label]) => [
+    h('h3', {}, label),
+    tools.filter(t => t.group === g).map(t => h('div', { class: 'tool' },
+      h('div', {}, h('div', { class: 'mono' }, t.name), h('div', { class: 'muted' }, t.description.split(/(?<=\.) /)[0])), modeSeg(t)))]));
+
+  const folders = folderListEditor(sc.folders);
+  const whereAll = h('input', { type: 'radio', name: 'where', value: 'all', checked: !sc.folders.length });
+  const whereSome = h('input', { type: 'radio', name: 'where', value: 'some', checked: sc.folders.length > 0 });
+  const folderBox = h('div', { hidden: !sc.folders.length }, folders.el);
+  [whereAll, whereSome].forEach(r => r.addEventListener('change', () => {
+    folderBox.hidden = whereAll.checked;
+    if (whereSome.checked && !folders.read().length) folders.add().focus();
+  }));
+  const apiBox = h('input', { type: 'checkbox', name: 'api', checked: sc.api });
+
+  const f = h('form', { class: 'stack' },
+    h('label', { class: 'field' }, h('span', {}, 'Name'), name),
+    h('div', { class: 'field' },
+      h('span', {}, 'Tools', info('Ask: Claude Code asks you before every call, in every permission mode, and offers no “don’t ask again”. Other MCP clients may treat it like On. On: the client’s own permission settings decide. Off: the token doesn’t offer the tool at all.')),
+      presets, toolList),
+    h('div', { class: 'field' },
+      h('span', {}, 'Folders', info('A token never reaches further than your account. Limited to some folders, it searches, reads, shares and edits only inside them, and sees only the links that point there.')),
+      h('div', { class: 'checks' }, h('label', {}, whereAll, 'Every folder your account can see'), h('label', {}, whereSome, 'Only these folders')),
+      folderBox),
+    h('div', { class: 'field' }, h('span', {}, 'REST API', info('Off: the token works only at the MCP endpoint. On: it also works for the REST API, with the same folders, and with sharing and editing only if it offers a share or edit tool.')),
+      h('div', { class: 'checks' }, h('label', {}, apiBox, 'Scripts can also use this token on the REST API'))),
+    err,
+    h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit' }, isNew ? 'Create token' : 'Save changes'), saved));
+  f.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    err.textContent = ''; saved.textContent = '';
+    const scope = { tools: sc.tools, folders: whereSome.checked ? folders.read() : [], api: apiBox.checked };
+    try {
+      if (isNew) {
+        const t = await api('/api/tokens', { method: 'POST', body: { name: name.value.trim(), scope } });
+        changed();
+        panelShell(t.name, tokenCreated(t));
+        return;
+      }
+      await api('/api/tokens/' + tok.id, { method: 'PATCH', body: { name: name.value.trim(), scope } });
+      saved.textContent = 'Saved ' + new Date().toLocaleTimeString('en-US', { hour12: false });
+      changed();
+    } catch (x) { err.textContent = x.message; }
+  });
+  panelShell(isNew ? 'New token' : tok.name, f);
+  if (isNew) name.focus();
+}
+
+// tokenCreated shows a new token once, with a ready-made client config.
+function tokenCreated(t) {
+  const cfg = JSON.stringify({ mcpServers: { burrow: { type: 'http', url: t.mcp_url, headers: { Authorization: 'Bearer ' + t.token } } } }, null, 2);
+  return [
+    h('p', {}, h('b', {}, 'Copy this token now. It won’t be shown again.')),
+    h('div', { class: 'secret' }, t.token),
+    h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: ev => copy(t.token, ev.currentTarget) }, 'Copy token')),
+    h('h3', {}, 'Claude Code'),
+    h('p', {}, 'Install the Burrow plugin, then paste the MCP endpoint and this token when it asks:'),
+    h('pre', { class: 'code' }, '/plugin install burrow --marketplace xattribution/burrow'),
+    h('dl', { class: 'facts' }, h('dt', {}, 'MCP endpoint'), h('dd', { class: 'mono' }, t.mcp_url)),
+    h('h3', {}, 'Other MCP clients'),
+    h('pre', { class: 'code' }, cfg),
+    h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: ev => copy(cfg, ev.currentTarget) }, 'Copy config'))];
+}
+
+function tokenList(initial, tools, mcpURL) {
+  const box = h('div', { class: 'stack' });
+  const reload = async () => draw(await api('/api/tokens'));
+  const draw = toks => put(box,
+    toks.length ? h('table', { class: 'files' }, h('tbody', {}, toks.map(t => h('tr', {},
+      h('td', { class: 'name' }, h('span', { class: 'label' }, t.name), h('span', { class: 'where' }, scopeSummary(t.scope, tools))),
+      h('td', { class: 'muted hide-s' }, t.last_used ? `Used ${fmtWhen(t.last_used)}${t.last_ip ? ' from ' + t.last_ip : ''}` : 'Never used'),
+      h('td', { class: 'r' }, h('div', { class: 'row end' },
+        h('button', { class: 'btn', type: 'button', onclick: () => tokenPanel(t, tools, mcpURL, reload) }, 'Edit'),
+        h('button', { class: 'btn danger', type: 'button', onclick: async () => { await api('/api/tokens/' + t.id, { method: 'DELETE' }); closePanel(false); reload(); } }, 'Delete'))))))) : null,
+    h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: () => tokenPanel(null, tools, mcpURL, reload) }, icon('plus'), 'New token')));
+  draw(initial);
+  return box;
+}
+
 // ---------- settings ----------
 async function viewSettings(s, seq) {
   SETTINGS = null;
   const st = await settings();
-  const tokens = await api('/api/tokens');
+  const [tokens, tools] = await Promise.all([api('/api/tokens'), api('/api/tokens/tools')]);
   if (seq !== routeSeq) return;
   CURRENT = [];
   put($('#sub'), h('b', {}, 'Settings'));
@@ -997,7 +1134,6 @@ async function viewSettings(s, seq) {
     return [h('h2', {}, title, help ? [' ', info(help)] : null), f];
   };
   const themeSel = h('select', { onchange: e => setTheme(e.target.value) }, [['', 'Match system'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => h('option', { value: v, selected: (localGet('theme') || '') === v }, l)));
-  const tokenOut = h('div');
   const mcpURL = (st.public_url || location.origin) + '/mcp';
   const admin = st.admin;
   put($('#content'), h('div', { class: 'page' },
@@ -1028,23 +1164,8 @@ async function viewSettings(s, seq) {
       f => api('/api/settings', { method: 'PUT', body: { admin_cidrs: f.cidrs.value } }))] : null,
     section('Phones', 'The Burrow app browses, shares, backs up and syncs your files. A paired phone acts as you, with your folder access, and talks to Burrow end-to-end encrypted, so even your reverse proxy only sees scrambled data. Remove a phone to cut it off at once.',
       (() => { const devs = devicesList(false); return [devs, pairPhone(() => devs.reload())]; })(), null),
-    section('MCP and API tokens', 'Tokens let an LLM client (or a script) search, read and share through the MCP endpoint. A token can see and share only what your account can, and can\u2019t change account settings. Delete it to cut access.',
-      [h('dl', { class: 'facts' }, h('dt', {}, 'MCP endpoint'), h('dd', { class: 'mono' }, mcpURL)),
-        tokens.length ? h('table', { class: 'files' }, h('tbody', {}, tokens.map(t => h('tr', {},
-          h('td', {}, t.name), h('td', { class: 'muted' }, t.last_used ? `Used ${fmtWhen(t.last_used)}${t.last_ip ? ' from ' + t.last_ip : ''}` : 'Never used'),
-          h('td', { class: 'r' }, h('button', { class: 'btn danger', type: 'button', onclick: async () => { await api('/api/tokens/' + t.id, { method: 'DELETE' }); route(); } }, 'Delete')))))) : null,
-        h('div', { class: 'row' }, h('input', { name: 'tname', placeholder: 'Token name, e.g. Claude' }), h('button', { class: 'btn', type: 'button', onclick: async e => {
-          const f = e.currentTarget.form;
-          const t = await api('/api/tokens', { method: 'POST', body: { name: f.tname.value } });
-          const cfg = JSON.stringify({ mcpServers: { burrow: { type: 'http', url: t.mcp_url, headers: { Authorization: 'Bearer ' + t.token } } } }, null, 2);
-          tokenOut.replaceChildren(
-            h('p', {}, h('b', {}, 'Copy this token now. It won’t be shown again.')),
-            h('div', { class: 'secret' }, t.token),
-            h('p', { class: 'muted' }, 'MCP client config:'),
-            h('pre', { class: 'code' }, cfg),
-            h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: ev => copy(t.token, ev.currentTarget) }, 'Copy token'), h('button', { class: 'btn', type: 'button', onclick: ev => copy(cfg, ev.currentTarget) }, 'Copy config')));
-        } }, 'Create token')),
-        tokenOut], null),
+    section('MCP and API tokens', 'Tokens let an LLM client (or a script) work with your files through the MCP endpoint. A token reaches no further than your account, and only as far as you set: which tools, which folders, and whether Claude Code asks you before each call. Tokens can\u2019t change account settings. Delete one to cut its access.',
+      [h('dl', { class: 'facts' }, h('dt', {}, 'MCP endpoint'), h('dd', { class: 'mono' }, mcpURL)), tokenList(tokens, tools, mcpURL)], null),
     section('Password', null,
       h('div', { class: 'grid2' },
         h('label', { class: 'field' }, h('span', {}, 'Current password'), h('input', { name: 'cur', type: 'password', autocomplete: 'current-password', required: true })),

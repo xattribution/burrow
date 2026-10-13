@@ -294,7 +294,6 @@ func (a *App) movePaths(from, to string) error {
 // ---- new folder, move, delete ----
 
 func (a *App) apiMkdir(w http.ResponseWriter, r *http.Request) {
-	u := userOf(r)
 	var in struct {
 		Path    string
 		Parents bool
@@ -303,10 +302,19 @@ func (a *App) apiMkdir(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad request")
 		return
 	}
-	segs := strings.Split(cleanRel(in.Path), "/")
-	if len(segs) < 2 {
-		writeErr(w, errNoWrite)
+	e, err := a.mkdir(userOf(r), in.Path, in.Parents)
+	if err != nil {
+		writeErr(w, err)
 		return
+	}
+	writeJSON(w, e)
+}
+
+// mkdir makes the folder p, and any missing parents when parents is set.
+func (a *App) mkdir(u *User, p string, parents bool) (Entry, error) {
+	segs := strings.Split(cleanRel(p), "/")
+	if len(segs) < 2 {
+		return Entry{}, errNoWrite
 	}
 	// the longest part that exists, then each missing folder in turn
 	n := len(segs) - 1
@@ -317,87 +325,85 @@ func (a *App) apiMkdir(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if n < len(segs)-1 && !in.Parents {
-		writeErr(w, fmt.Errorf("the folder %s doesn't exist", strings.Join(segs[:n+1], "/")))
-		return
+	if n < len(segs)-1 && !parents {
+		return Entry{}, fmt.Errorf("the folder %s doesn't exist", strings.Join(segs[:n+1], "/"))
 	}
 	created := false
 	for i := n; i < len(segs); i++ {
 		dir := strings.Join(segs[:i], "/")
 		dabs, _, _, err := a.newEntry(u, dir, segs[i])
 		if err != nil {
-			writeErr(w, err)
-			return
+			return Entry{}, err
 		}
 		err = os.Mkdir(filepath.Join(dabs, segs[i]), 0o775)
 		if errors.Is(err, fs.ErrExist) {
-			if fi, serr := os.Lstat(filepath.Join(dabs, segs[i])); serr == nil && fi.IsDir() && (i < len(segs)-1 || in.Parents) {
+			if fi, serr := os.Lstat(filepath.Join(dabs, segs[i])); serr == nil && fi.IsDir() && (i < len(segs)-1 || parents) {
 				continue
 			}
-			writeErr(w, errExists)
-			return
+			return Entry{}, errExists
 		}
 		if err != nil {
-			writeErr(w, errors.New("could not create the folder"))
-			return
+			return Entry{}, errors.New("could not create the folder")
 		}
 		if !created {
 			defer a.idx.Refresh(dir)
 			created = true
 		}
 	}
-	abs, rel, _ := a.resolve(in.Path)
+	abs, rel, _ := a.resolve(p)
 	fi, err := os.Stat(abs)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return Entry{}, err
 	}
-	writeJSON(w, entryFromInfo(rel, fi))
+	return entryFromInfo(rel, fi), nil
 }
 
 func (a *App) apiMove(w http.ResponseWriter, r *http.Request) {
-	u := userOf(r)
 	var in struct{ From, To string }
 	if err := readJSON(r, &in); err != nil {
 		httpErr(w, 400, "bad request")
 		return
 	}
-	from, fromRel, _, err := a.existingWritable(u, in.From)
+	to, err := a.move(userOf(r), in.From, in.To)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	to := cleanRel(in.To)
+	writeJSON(w, map[string]string{"path": to})
+}
+
+// move moves or renames fromP to toP without ever replacing anything there, and
+// returns the new library path.
+func (a *App) move(u *User, fromP, toP string) (string, error) {
+	from, fromRel, _, err := a.existingWritable(u, fromP)
+	if err != nil {
+		return "", err
+	}
+	to := cleanRel(toP)
 	dir, name := path.Split(to)
 	dabs, dirRel, toRel, err := a.newEntry(u, strings.TrimSuffix(dir, "/"), name)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return "", err
 	}
 	if toRel == fromRel {
-		writeJSON(w, map[string]string{"path": toRel})
-		return
+		return toRel, nil
 	}
 	if strings.HasPrefix(toRel+"/", fromRel+"/") {
-		writeErr(w, errors.New("a folder can't be moved into itself"))
-		return
+		return "", errors.New("a folder can't be moved into itself")
 	}
 	if !sameMount(filepath.Dir(from), dabs) {
-		writeErr(w, errCrossMount)
-		return
+		return "", errCrossMount
 	}
 	a.shareMu.Lock() // links are rewritten with the move
 	defer a.shareMu.Unlock()
 	if err := renameNoReplace(from, filepath.Join(dabs, name)); err != nil {
-		writeErr(w, err)
-		return
+		return "", err
 	}
 	if err := a.movePaths(fromRel, toRel); err != nil {
-		httpErr(w, 500, err.Error())
-		return
+		return "", err
 	}
 	a.idx.Refresh(path.Dir(fromRel), dirRel)
-	writeJSON(w, map[string]string{"path": toRel})
+	return toRel, nil
 }
 
 // trashDir is where something at abs goes when deleted: a hidden folder on the
@@ -486,13 +492,9 @@ func (a *App) apiDelete(w http.ResponseWriter, r *http.Request) {
 	dirs := map[string]bool{}
 	for _, it := range in.Items {
 		res := result{Path: cleanRel(it.Path)}
-		abs, rel, fi, err := a.existingWritable(u, it.Path)
-		if err == nil && it.Size != nil && it.Mtime != nil && !fi.IsDir() && (fi.Size() != *it.Size || mtimeMs(fi) != *it.Mtime) {
-			err = errChanged
-		}
-		if err == nil {
-			res.TrashID, err = a.toTrash(u, abs, rel, fi)
-		}
+		var rel string
+		var err error
+		res.TrashID, rel, err = a.trash(u, it.Path, it.Size, it.Mtime)
 		if err != nil {
 			res.Error = err.Error()
 			res.Code = map[bool]int{true: 409, false: 403}[errors.Is(err, errChanged)]
@@ -509,6 +511,75 @@ func (a *App) apiDelete(w http.ResponseWriter, r *http.Request) {
 		a.idx.Refresh(d)
 	}
 	writeJSON(w, out)
+}
+
+// trash moves p to the trash (only if it is still the version the caller saw, when
+// size and mtime are given) and returns the trash id and p's library path.
+func (a *App) trash(u *User, p string, size, mtime *int64) (string, string, error) {
+	abs, rel, fi, err := a.existingWritable(u, p)
+	if err == nil && size != nil && mtime != nil && !fi.IsDir() && (fi.Size() != *size || mtimeMs(fi) != *mtime) {
+		err = errChanged
+	}
+	if err != nil {
+		return "", rel, err
+	}
+	id, err := a.toTrash(u, abs, rel, fi)
+	return id, rel, err
+}
+
+// writeText creates the text file p, or replaces it when overwrite is set (the old
+// version goes to the trash). Like an upload it is written under a hidden name,
+// flushed to disk, then renamed into place.
+func (a *App) writeText(u *User, p, text string, overwrite bool) (map[string]any, error) {
+	dir, name := path.Split(cleanRel(p))
+	dabs, dirRel, rel, err := a.newEntry(u, strings.TrimSuffix(dir, "/"), name)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.checkSpaceAt(dabs, int64(len(text))); err != nil {
+		return nil, err
+	}
+	target := filepath.Join(dabs, name)
+	cur, statErr := os.Lstat(target)
+	exists := statErr == nil
+	if exists && (!overwrite || !cur.Mode().IsRegular()) {
+		return nil, errExists
+	}
+	tmp := filepath.Join(dabs, partPrefix+"text-"+randSlug(12))
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o664)
+	if err != nil {
+		return nil, errors.New("could not write the file")
+	}
+	_, werr := f.WriteString(text)
+	if werr == nil {
+		werr = f.Sync()
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(tmp)
+		return nil, errors.New("could not write the file")
+	}
+	if exists {
+		if _, err = a.toTrashCopy(u, target, rel, cur); err == nil {
+			err = os.Rename(tmp, target)
+		}
+	} else {
+		err = renameNoReplace(tmp, target)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return nil, err
+	}
+	fi, err := os.Stat(target)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256([]byte(text))
+	_, _ = a.st.exec(`INSERT OR REPLACE INTO file_hashes(path,size,mtime,sha256) VALUES(?,?,?,?)`, rel, fi.Size(), mtimeMs(fi), hex.EncodeToString(sum[:]))
+	a.idx.Refresh(dirRel)
+	return map[string]any{"path": rel, "size": humanSize(fi.Size()), "replaced": exists}, nil
 }
 
 // ---- trash ----

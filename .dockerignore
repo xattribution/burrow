@@ -2,3 +2,5 @@
 *.db
 state/
 drop/
+.claude-plugin/
+claude-plugin/
