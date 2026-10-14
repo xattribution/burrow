@@ -66,6 +66,17 @@ fun formatWhen(seconds: Long): String = when {
     else -> DateUtils.getRelativeTimeSpanString(seconds * 1000, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString()
 }
 
+/** "Oct 7, 12:56 AM" this year, "Jun 19, 2025, 11:24 PM" otherwise, in the phone's own format. */
+fun formatDate(seconds: Long, ctx: android.content.Context): String {
+    if (seconds <= 0) return ""
+    val ms = seconds * 1000
+    val thisYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+    val year = java.util.Calendar.getInstance().apply { timeInMillis = ms }.get(java.util.Calendar.YEAR)
+    var flags = DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_ABBREV_MONTH
+    flags = flags or if (year == thisYear) DateUtils.FORMAT_NO_YEAR else DateUtils.FORMAT_SHOW_YEAR
+    return DateUtils.formatDateTime(ctx, ms, flags)
+}
+
 fun kindIcon(kind: String, dir: Boolean): ImageVector = when {
     dir -> Icons.Outlined.Folder
     kind == "image" -> Icons.Outlined.Image

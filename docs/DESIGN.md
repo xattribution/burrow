@@ -347,6 +347,9 @@ The rules, as numbered in the CSS comments:
 | O3 | No explainer or subtitle text on pages | help goes in the small (i) tooltip, `info()` in `app.js` |
 | O4 | Don't round every corner or box every section | regions sit flush, separated by single rules; the 4 px radius is only on controls |
 
+- **OLED black:** in dark mode the page background is pure black (`--paper`) on the web, and `background`/`surface` are pure black in the app, with neutral near-blacks for raised surfaces. On OLED screens those pixels are off.
+- **Accent:** amber on the web (filled amber folder icons, the current folder in the path bar). The app follows the phone's wallpaper colors (dynamic color), and falls back to the same amber on Android 11 and older.
+- **Path bar:** a pill with a home icon and chevrons; the folder you're in is in the accent color. In the app the folder name is a large title that collapses into the bar as you scroll.
 - **Font:** Atkinson Hyperlegible 400 and 700, embedded (OFL, `web/FONT-LICENSE.txt`). It was chosen because file names are the data, and I/l/1 and O/0 must be easy to tell apart. Share ids and tokens use the mono font.
 - **Status ladder:** `--ok` active, `--caution` expiring within 24 h, `--bad` expired, revoked, used up, missing, unavailable. Color plus a shape (dot, triangle, square).
 - **Code:** vanilla JS, no build step. `h()` builds elements, and `put()` replaces children while skipping `null` (plain `replaceChildren` prints "null"). All view state lives in the URL: `view, path, q, kind, sort, sel, share, tab, within, add, user`.

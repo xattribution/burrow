@@ -63,6 +63,20 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.LargeTopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.text.font.FontWeight
+import io.github.xattribution.burrow.ui.common.formatDate
 import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
 import androidx.compose.material3.adaptive.layout.AnimatedPane
 import androidx.compose.material3.adaptive.layout.ListDetailPaneScaffoldRole
@@ -97,7 +111,6 @@ import io.github.xattribution.burrow.ui.common.Busy
 import io.github.xattribution.burrow.ui.common.EmptyState
 import io.github.xattribution.burrow.ui.common.Load
 import io.github.xattribution.burrow.ui.common.formatSize
-import io.github.xattribution.burrow.ui.common.formatWhen
 import io.github.xattribution.burrow.ui.common.kindIcon
 import io.github.xattribution.burrow.work.stageForUpload
 import kotlinx.coroutines.launch
@@ -205,7 +218,15 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
         }
     }
 
+    // the folder name starts large and collapses into the bar as the list scrolls, like the system apps
+    val collapse = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val barColors = TopAppBarDefaults.topAppBarColors(
+        containerColor = MaterialTheme.colorScheme.background,
+        scrolledContainerColor = MaterialTheme.colorScheme.background,
+    )
     Scaffold(
+        modifier = if (searching) Modifier else Modifier.nestedScroll(collapse.nestedScrollConnection),
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             if (searching) {
                 TopAppBar(
@@ -220,7 +241,9 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
                     },
                 )
             } else {
-                TopAppBar(
+                LargeTopAppBar(
+                    scrollBehavior = collapse,
+                    colors = barColors,
                     navigationIcon = { if (path.isNotEmpty()) IconButton(onClick = { vm.up() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Up") } },
                     title = { Text(path.substringAfterLast('/').ifEmpty { "Burrow" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     actions = {
@@ -280,16 +303,32 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
     }
 }
 
+/** The path as a pill: home, then each folder; the folder you're in is in the accent color. */
 @Composable
 private fun Crumbs(path: String, onOpen: (String) -> Unit) {
     val segs = path.split('/')
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        TextButton(onClick = { onOpen("") }) { Text("Burrow") }
+    val scroll = rememberScrollState()
+    LaunchedEffect(path) { scroll.scrollTo(scroll.maxValue) }
+    Row(
+        Modifier.padding(horizontal = 16.dp, vertical = 4.dp).fillMaxWidth().heightIn(min = 52.dp)
+            .clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .horizontalScroll(scroll).padding(horizontal = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = { onOpen("") }) { Icon(Icons.Filled.Home, "Burrow", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
         segs.forEachIndexed { i, s ->
-            Text("/", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            val last = i == segs.size - 1
             val target = segs.take(i + 1).joinToString("/")
-            TextButton(onClick = { onOpen(target) }, enabled = i < segs.size - 1) { Text(s, maxLines = 1) }
+            Text(
+                s, maxLines = 1,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = if (last) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (last) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.clip(CircleShape).let { if (last) it else it.combinedClickable(onClick = { onOpen(target) }) }.padding(horizontal = 10.dp, vertical = 12.dp),
+            )
         }
+        Spacer(Modifier.width(8.dp))
     }
 }
 
@@ -310,25 +349,30 @@ fun EntryList(entries: List<Entry>, grid: Boolean, selected: String?, showWhere:
         }
     } else {
         LazyColumn(Modifier.fillMaxSize()) {
-            items(entries, key = { it.path }) { e -> EntryRow(e, e.path == selected, showWhere) { onOpen(e) } }
+            items(entries, key = { it.path }) { e ->
+                EntryRow(e, e.path == selected, showWhere) { onOpen(e) }
+                if (e != entries.last()) HorizontalDivider(Modifier.padding(start = 88.dp, end = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            }
         }
     }
 }
 
 @Composable
 private fun EntryRow(e: Entry, selected: Boolean, showWhere: Boolean, onClick: () -> Unit) {
+    val ctx = LocalContext.current
     ListItem(
-        modifier = Modifier.combinedClickable(onClick = onClick),
-        colors = if (selected) ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.secondaryContainer) else ListItemDefaults.colors(),
-        leadingContent = { Leading(e, 40) },
-        headlineContent = { Text(e.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        modifier = Modifier.combinedClickable(onClick = onClick).padding(vertical = 4.dp),
+        colors = ListItemDefaults.colors(containerColor = if (selected) MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent),
+        leadingContent = { Leading(e, 48) },
+        headlineContent = { Text(e.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         supportingContent = {
-            val bits = buildList {
-                if (showWhere) add(e.path.substringBeforeLast('/', ""))
-                if (!e.dir) add(formatSize(e.size))
-                add(formatWhen(e.mtime))
+            Column {
+                if (showWhere) Text(e.path.substringBeforeLast('/', "").ifEmpty { "Burrow" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Text(formatDate(e.mtime, ctx), maxLines = 1)
+                    if (!e.dir) Text(formatSize(e.size), maxLines = 1)
+                }
             }
-            Text(bits.filter { it.isNotEmpty() }.joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis)
         },
         trailingContent = if (e.shared > 0) ({ Icon(Icons.Outlined.Link, "Shared", tint = MaterialTheme.colorScheme.primary) }) else null,
     )
@@ -338,7 +382,7 @@ private fun EntryRow(e: Entry, selected: Boolean, showWhere: Boolean, onClick: (
 private fun Tile(e: Entry, selected: Boolean, onClick: () -> Unit) {
     Column(
         Modifier.padding(4.dp).clip(RoundedCornerShape(12.dp)).combinedClickable(onClick = onClick)
-            .background(if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
+            .background(if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainerLow),
     ) {
         Box(Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.Center) { Leading(e, 0) }
         Text(e.name, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(8.dp))
@@ -353,7 +397,7 @@ private fun Leading(e: Entry, size: Int) {
         AsyncImage(model = ThumbFetcher.Thumb(e.path, e.mtime), contentDescription = null, contentScale = ContentScale.Crop, modifier = m.background(MaterialTheme.colorScheme.surfaceVariant))
     } else {
         Box(m, contentAlignment = Alignment.Center) {
-            Icon(kindIcon(e.kind, e.dir), null, Modifier.size(if (size > 0) 28.dp else 40.dp), tint = if (e.dir) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(if (e.dir) Icons.Filled.Folder else kindIcon(e.kind, false), null, Modifier.size(if (size > 0) 36.dp else 48.dp), tint = if (e.dir) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

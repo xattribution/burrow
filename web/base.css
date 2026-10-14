@@ -7,7 +7,8 @@
   - Links have real states (active, expiring, expired, revoked, used up), so there is a status ladder.
 
   ledger:
-  | --accent (teal)          | the one interactive color: primary buttons, selected nav, focus | rule O2, not a stock indigo |
+  | --accent (amber)         | the one interactive color: primary buttons, selected nav, focus, folder icons | rule O2; matches the phone's file manager the owner uses daily |
+  | --paper #000 in dark     | true black for OLED screens: pixels off, no glow at night | owner request |
   | --ok / --caution / --bad | link states only: active / expiring within 24 h / expired, revoked, errors | status ladder |
   | radius 4px on controls   | marks what is clickable; regions sit flush | O4 |
   | mono on share ids, tokens | strings people compare character by character | required practices: type |
@@ -23,10 +24,10 @@
   --ink: oklch(0.22 0.01 220);
   --ink-2: oklch(0.45 0.012 220);
   --rule: oklch(0.86 0.008 210);
-  --accent: oklch(0.5 0.1 195);
-  --on-accent: oklch(0.99 0 0);
+  --accent: oklch(0.62 0.14 70);
+  --on-accent: oklch(0.16 0.02 70);
   --ok: oklch(0.5 0.12 150);
-  --caution: oklch(0.55 0.13 75);
+  --caution: oklch(0.56 0.16 45);
   --bad: oklch(0.52 0.17 28);
   --hit: oklch(0.88 0.09 95);
   --on-hit: oklch(0.2 0.02 90);
@@ -36,35 +37,35 @@
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --paper: oklch(0.19 0.008 220);
-    --surface: oklch(0.225 0.009 220);
-    --surface-2: oklch(0.28 0.01 220);
-    --ink: oklch(0.93 0.005 220);
-    --ink-2: oklch(0.72 0.01 220);
-    --rule: oklch(0.33 0.01 220);
-    --accent: oklch(0.74 0.11 192);
-    --on-accent: oklch(0.17 0.02 210);
-    --ok: oklch(0.74 0.13 150);
-    --caution: oklch(0.8 0.13 80);
-    --bad: oklch(0.7 0.16 28);
-    --hit: oklch(0.45 0.08 95);
-    --on-hit: oklch(0.97 0.02 95);
+    --paper: oklch(0 0 0);
+    --surface: oklch(0.155 0 0);
+    --surface-2: oklch(0.23 0 0);
+    --ink: oklch(0.96 0 0);
+    --ink-2: oklch(0.72 0 0);
+    --rule: oklch(0.27 0 0);
+    --accent: oklch(0.84 0.14 82);
+    --on-accent: oklch(0.15 0.02 80);
+    --ok: oklch(0.76 0.14 150);
+    --caution: oklch(0.76 0.15 50);
+    --bad: oklch(0.7 0.17 28);
+    --hit: oklch(0.42 0.08 85);
+    --on-hit: oklch(0.98 0.02 85);
   }
 }
 :root[data-theme="dark"] {
-  --paper: oklch(0.19 0.008 220);
-  --surface: oklch(0.225 0.009 220);
-  --surface-2: oklch(0.28 0.01 220);
-  --ink: oklch(0.93 0.005 220);
-  --ink-2: oklch(0.72 0.01 220);
-  --rule: oklch(0.33 0.01 220);
-  --accent: oklch(0.74 0.11 192);
-  --on-accent: oklch(0.17 0.02 210);
-  --ok: oklch(0.74 0.13 150);
-  --caution: oklch(0.8 0.13 80);
-  --bad: oklch(0.7 0.16 28);
-  --hit: oklch(0.45 0.08 95);
-  --on-hit: oklch(0.97 0.02 95);
+  --paper: oklch(0 0 0);
+  --surface: oklch(0.155 0 0);
+  --surface-2: oklch(0.23 0 0);
+  --ink: oklch(0.96 0 0);
+  --ink-2: oklch(0.72 0 0);
+  --rule: oklch(0.27 0 0);
+  --accent: oklch(0.84 0.14 82);
+  --on-accent: oklch(0.15 0.02 80);
+  --ok: oklch(0.76 0.14 150);
+  --caution: oklch(0.76 0.15 50);
+  --bad: oklch(0.7 0.17 28);
+  --hit: oklch(0.42 0.08 85);
+  --on-hit: oklch(0.98 0.02 85);
 }
 
 * { box-sizing: border-box; }

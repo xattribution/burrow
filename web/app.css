@@ -18,11 +18,13 @@
 .search .icon { position: absolute; inset-inline-start: 9px; color: var(--ink-2); pointer-events: none; }
 .search kbd { position: absolute; inset-inline-end: 8px; font: 13px var(--mono); color: var(--ink-2); border: 1px solid var(--rule); padding: 0 5px; border-radius: 3px; }
 .sub { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 16px; min-height: 42px; }
-.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 15px; }
-.crumbs a { color: var(--ink); text-decoration: none; padding: 2px 4px; border-radius: var(--r); }
-.crumbs a:hover { background: var(--surface-2); }
-.crumbs .sep { color: var(--ink-2); }
-.crumbs b { padding: 2px 4px; }
+.crumbs { display: flex; align-items: center; gap: 2px; font-size: 15px; background: var(--surface); border-radius: 999px; padding: 4px 14px 4px 6px; min-block-size: 44px; max-inline-size: 100%; overflow-x: auto; scrollbar-width: none; } /* ledger: pill path bar, a control people tap; matches the phone's file manager */
+.crumbs a, .crumbs b { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); text-decoration: none; padding: 6px 8px; border-radius: 999px; white-space: nowrap; min-block-size: 36px; } /* ledger: pill segments inside the pill bar */
+.crumbs a:hover { background: var(--surface-2); color: var(--ink); }
+.crumbs b { color: var(--accent); }
+.crumbs .sep { inline-size: 14px; block-size: 14px; color: var(--ink-2); flex: none; }
+.crumbs .home { inline-size: 20px; block-size: 20px; fill: currentColor; stroke: none; }
+.crumbs a .home-label { display: none; }
 .sub .grow { flex: 1; }
 .timing { font-size: 13px; color: var(--ink-2); }
 .content { flex: 1; overflow: auto; }
@@ -34,23 +36,25 @@
 /* file table */
 table.files { inline-size: 100%; border-collapse: collapse; }
 .files th { position: sticky; inset-block-start: 0; background: var(--paper); z-index: 1; text-align: start; font-size: 13px; font-weight: 700; color: var(--ink-2); padding: 6px 8px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
-.files td { padding: 0 8px; block-size: 36px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.files td { padding: 0 8px; block-size: 52px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
 .files tr { cursor: default; }
 .files tbody tr:hover { background: var(--surface); }
 .files tr[aria-selected="true"] { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent); } /* ledger: solid neutral step + solid accent bar (O1) */
 .files .r { text-align: end; }
 .files .name { inline-size: 100%; max-inline-size: 0; overflow: hidden; text-overflow: ellipsis; }
-.files .name > span:first-child { display: inline-flex; align-items: center; gap: 9px; max-inline-size: 100%; }
+.files .name > span:first-child { display: inline-flex; align-items: center; gap: 14px; max-inline-size: 100%; }
+.files .name .icon { inline-size: 26px; block-size: 26px; }
 .files .name .label { overflow: hidden; text-overflow: ellipsis; }
 .files .name a { color: var(--ink); text-decoration: none; }
 .files .name a:hover { text-decoration: underline; }
-.files .where { display: block; padding-inline-start: 27px; font-size: 13px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; margin-top: -3px; }
-.files td.name:has(.where) { block-size: 44px; }
-.files .th { inline-size: 24px; block-size: 24px; object-fit: cover; flex: none; background: var(--surface-2); }
+.files .where { display: block; padding-inline-start: 40px; font-size: 13px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; margin-top: -3px; }
+.files td.name:has(.where) { block-size: 60px; }
+.files .phone-meta { display: none; }
+.files .th { inline-size: 26px; block-size: 26px; border-radius: var(--r); object-fit: cover; flex: none; background: var(--surface-2); }
 .files .flags { display: inline-flex; gap: 4px; color: var(--accent); }
 .files .flags .icon { inline-size: 15px; block-size: 15px; }
 mark { background: var(--hit); color: var(--on-hit); padding: 0 1px; }
-.k-folder { color: var(--accent); }
+.k-folder { color: var(--accent); fill: var(--accent); } /* ledger: filled folder in the accent, the way native file managers mark folders */
 .empty { padding: 40px 16px; color: var(--ink-2); }
 .empty b { color: var(--ink); display: block; font-size: 17px; margin-bottom: 4px; }
 
@@ -152,6 +156,9 @@ pre.code { font: 13px/1.5 var(--mono); background: var(--surface); padding: 10px
   .brand span { display: none; }
   .hide-s { display: none; }
   .mobile-only { display: inline-flex; }
+  .files.browse .phone-meta { display: block; }
+  .files td.name:has(.phone-meta) { block-size: 64px; }
+  .files.browse th.r, .files.browse td.r { display: none; }
   .grid2 { grid-template-columns: 1fr; }
   .panel { inline-size: 100vw; }
 }
