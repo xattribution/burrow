@@ -42,6 +42,8 @@ type App struct {
 	dev       devState     // pairing codes and device sessions
 	devMux    http.Handler // what a paired device may call, inside the channel
 	upLocks   sync.Map     // upload id -> *sync.Mutex
+	remotes   *remoteSet   // connected NAS, by library name
+	jobs      jobSet       // copies between libraries
 }
 
 func newApp(cfg Config, st *Store) (*App, error) {
@@ -62,6 +64,7 @@ func newApp(cfg Config, st *Store) (*App, error) {
 	}
 	a.idx = newIndexer(cfg, st)
 	a.devMux = a.deviceRoutes()
+	a.loadRemotes()
 	a.publicUI.Store(st.get("public_ui") == "1")
 	a.publicMCP.Store(st.get("public_mcp") == "1")
 	if !a.setupDone() {
@@ -172,6 +175,11 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/tokens/{id}", ses(a.apiDelToken))
 	mux.HandleFunc("PATCH /api/tokens/{id}", ses(a.apiPatchToken))
 	mux.HandleFunc("GET /api/tokens/tools", ses(a.apiTokenTools))
+	mux.HandleFunc("GET /api/remotes", admSes(a.apiRemotes))
+	mux.HandleFunc("POST /api/remotes", admSes(a.apiAddRemote))
+	mux.HandleFunc("POST /api/remotes/shares", admSes(a.apiRemoteShares))
+	mux.HandleFunc("PATCH /api/remotes/{id}", admSes(a.apiPatchRemote))
+	mux.HandleFunc("DELETE /api/remotes/{id}", admSes(a.apiDeleteRemote))
 	mux.HandleFunc("GET /api/users", admSes(a.apiUsers))
 	mux.HandleFunc("POST /api/users", admSes(a.apiCreateUser))
 	mux.HandleFunc("PATCH /api/users/{id}", admSes(a.apiPatchUser))
@@ -277,6 +285,8 @@ func (a *App) writeRoutes() []route {
 		{"PUT /api/uploads/{id}", a.apiUploadChunk},
 		{"POST /api/uploads/{id}/finish", a.apiUploadFinish},
 		{"DELETE /api/uploads/{id}", a.apiUploadCancel},
+		{"GET /api/jobs", a.apiJobs},
+		{"GET /api/jobs/{id}", a.apiJob},
 		{"GET /api/sync/list", a.apiSyncList},
 		{"GET /api/sync/changed", a.apiSyncChanged},
 		{"GET /api/sync/hash", a.apiSyncHash},
@@ -580,7 +590,7 @@ func (a *App) saveRoots(roots []string) {
 	}
 	clean := []string{}
 	for _, r := range roots {
-		if valid[r] {
+		if _, _, remote := a.remoteOf(r); valid[r] && !remote {
 			clean = append(clean, r)
 		}
 	}
@@ -672,6 +682,10 @@ func (a *App) apiLogin(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) apiLs(w http.ResponseWriter, r *http.Request) {
 	es, err := a.listDir(userOf(r), r.URL.Query().Get("path"))
+	if errors.Is(err, errRemoteDown) {
+		httpErr(w, 502, err.Error())
+		return
+	}
 	if err != nil {
 		code := 404
 		if errors.Is(err, errNotAllowed) {
@@ -682,10 +696,13 @@ func (a *App) apiLs(w http.ResponseWriter, r *http.Request) {
 	}
 	p := cleanRel(r.URL.Query().Get("path"))
 	canWrite := false
-	if abs, _, err := a.resolve(p); err == nil && p != "" {
+	if _, _, ok := a.remoteOf(p); ok {
+		canWrite = userOf(r).can(p, permWrite)
+	} else if abs, _, err := a.resolve(p); err == nil && p != "" {
 		canWrite = userOf(r).can(p, permWrite) && mountWritable(abs)
 	}
-	writeJSON(w, map[string]any{"path": p, "entries": es, "can_share": p != "" && userOf(r).can(p, permShare), "can_write": canWrite})
+	_, _, remote := a.remoteOf(p)
+	writeJSON(w, map[string]any{"path": p, "entries": es, "can_share": p != "" && !remote && userOf(r).can(p, permShare), "can_write": canWrite})
 }
 
 func (a *App) apiSearch(w http.ResponseWriter, r *http.Request) {
@@ -710,6 +727,10 @@ func (a *App) apiSearch(w http.ResponseWriter, r *http.Request) {
 // (they may read something inside it) is described, with counts limited to what they may read.
 func (a *App) apiInfo(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
+	if _, _, ok := a.remoteOf(r.URL.Query().Get("path")); ok {
+		a.remoteInfo(w, u, r.URL.Query().Get("path"))
+		return
+	}
 	abs, rel, err := a.resolve(r.URL.Query().Get("path"))
 	if err != nil || !u.canReach(rel, permRead) {
 		httpErr(w, 404, "not found")
@@ -740,6 +761,10 @@ func (a *App) apiInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) apiRaw(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := a.remoteOf(r.URL.Query().Get("path")); ok {
+		a.remoteRaw(w, r, userOf(r), r.URL.Query().Get("path"), r.URL.Query().Get("dl") == "1")
+		return
+	}
 	abs, _, err := a.resolveFor(userOf(r), r.URL.Query().Get("path"), permRead)
 	if err != nil {
 		httpErr(w, 404, "not found")
@@ -754,6 +779,10 @@ func (a *App) apiRaw(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) apiThumb(w http.ResponseWriter, r *http.Request) {
+	if _, _, ok := a.remoteOf(r.URL.Query().Get("path")); ok {
+		a.remoteThumb(w, r, userOf(r), r.URL.Query().Get("path"))
+		return
+	}
 	abs, _, err := a.resolveFor(userOf(r), r.URL.Query().Get("path"), permRead)
 	if err != nil {
 		http.NotFound(w, r)
@@ -770,6 +799,10 @@ func (a *App) apiThumb(w http.ResponseWriter, r *http.Request) {
 // apiZip streams a folder as a zip, leaving out anything inside the user may not read.
 func (a *App) apiZip(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
+	if _, _, ok := a.remoteOf(r.URL.Query().Get("path")); ok {
+		httpErr(w, 400, "folders on a connected NAS can't be downloaded as a zip yet")
+		return
+	}
 	abs, rel, err := a.resolve(r.URL.Query().Get("path"))
 	if err != nil || !u.canReach(rel, permRead) {
 		httpErr(w, 404, "not found")

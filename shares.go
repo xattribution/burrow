@@ -206,6 +206,8 @@ var errAdminsOnly = errors.New("only admins can do that")
 
 // createShare makes a link owned by u. Nothing is copied and no folder is created:
 // a drop's or shared folder's upload folder only appears when the first file arrives.
+var errRemoteNoLinks = errors.New("links to a connected NAS aren't available yet; move or copy the files here first")
+
 func (a *App) createShare(r *http.Request, u *User, in ShareInput) (Share, error) {
 	in.Mode = strings.ToLower(strings.TrimSpace(in.Mode))
 	if in.Mode == "" {
@@ -219,6 +221,9 @@ func (a *App) createShare(r *http.Request, u *User, in ShareInput) (Share, error
 	isDir := false
 	switch in.Mode {
 	case "link":
+		if _, _, remote := a.remoteOf(in.Path); remote {
+			return Share{}, errRemoteNoLinks
+		}
 		abs, cr, err := a.resolve(in.Path)
 		if err != nil {
 			return Share{}, fmt.Errorf("can't share %q: %w", in.Path, err)
@@ -880,18 +885,7 @@ func (a *App) serveFile(w http.ResponseWriter, r *http.Request, abs string, info
 		return
 	}
 	defer f.Close()
-	ctype := mime.TypeByExtension(strings.ToLower(filepath.Ext(abs)))
-	if ctype == "" {
-		ctype = "application/octet-stream"
-	}
-	// Never let a shared HTML/SVG file run script on our origin.
-	if strings.HasPrefix(ctype, "text/html") || strings.HasPrefix(ctype, "image/svg") || strings.Contains(ctype, "javascript") || strings.Contains(ctype, "xml") {
-		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'")
-		if strings.HasPrefix(ctype, "text/html") || strings.Contains(ctype, "javascript") {
-			ctype = "text/plain; charset=utf-8"
-		}
-	}
-	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Type", safeContentType(w, abs))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if w.Header().Get("Cache-Control") == "" {
 		w.Header().Set("Cache-Control", "private")
@@ -902,6 +896,22 @@ func (a *App) serveFile(w http.ResponseWriter, r *http.Request, abs string, info
 	}
 	w.Header().Set("Content-Disposition", mime.FormatMediaType(disp, map[string]string{"filename": info.Name()}))
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+}
+
+// safeContentType is the type to serve a file named name as. A shared HTML or
+// SVG file never runs script on our origin.
+func safeContentType(w http.ResponseWriter, name string) string {
+	ctype := mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	if strings.HasPrefix(ctype, "text/html") || strings.HasPrefix(ctype, "image/svg") || strings.Contains(ctype, "javascript") || strings.Contains(ctype, "xml") {
+		w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'")
+		if strings.HasPrefix(ctype, "text/html") || strings.Contains(ctype, "javascript") {
+			ctype = "text/plain; charset=utf-8"
+		}
+	}
+	return ctype
 }
 
 // zipSource is one top-level entry in a zip: a file or folder on disk, its name in

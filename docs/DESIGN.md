@@ -473,6 +473,20 @@ The QR code carries the home address (`lan_url`, or the address the browser used
 - `android/app` (Robolectric, against the real server): pairing from a link and using the app at phone, folded cover screen, unfolded and tablet sizes, with screenshots; a removed phone returning to pairing; a dragged-out file's address, its name and size, and in-order and seeking reads streamed from the server.
 - CI also runs the app on an Android emulator: the Keystore, a photo backup from the media library, the backed-up photo read back through its drag-out address with seeking, background sync through WorkManager, and the R8-shrunk release build paired and browsed through its own screens.
 
+## 16a. Connected NAS (`remote.go`, `remote_ops.go`, `transfer.go`)
+
+- A connection is added on the Burrow it should live on. On the server (this section) it becomes a library for everyone given access to it. In the phone app it will stay on that phone, so a folder someone else shared with you never reaches your own NAS unless you link it there.
+- Each one is a `remoteFS`: SMB through `github.com/cloudsoda/go-smb2` (pure Go, SMB2/3, NTLM), or another Burrow through its REST API with an API token. Without a fingerprint the other Burrow's certificate must be publicly trusted; with one, only that exact certificate is. Redirects aren't followed.
+- The connection's name is its top folder, so grants, favorites and the permission checks work unchanged. A name can't match a local top-level folder, and a local folder with that name can't be enabled as a library.
+- Every path segment on a connected NAS has to pass `validName`: no `.burrow-*` names, no hidden names, no separators or control characters. SMB listings skip links and devices.
+- The config is sealed with AES-256-GCM using `remotes.key` (0600) in the state folder, so a copy of the database alone doesn't expose a password. The settings API returns the config without its secrets, and a change that leaves a secret empty keeps the stored one.
+- Reads stream with ranges (`http.ServeContent` over an SMB file or a range-requesting reader for another Burrow), and content types get the same sandboxing as local files. Thumbnails are cached under a key that includes the connection id, size and mtime.
+- Uploads keep their partial file in `state/remote-parts`, checked with SHA-256 like any upload, and are written to the NAS at the end with the same conflict modes. SMB writes create the file exclusively; SMB renames check the target first because the protocol replaces by default.
+- Deletes go to `.burrow-trash/<id>/` on an SMB share and appear in **Recently deleted** (the row's `stored` is `remote:<connection id>:<path>`), with restore and the 30-day purge. Another Burrow keeps its own trash.
+- A move between libraries, or between two mounts of this NAS (which used to fail), is a background job: count, copy (never over anything), then trash the original. If any file was skipped because the user can't read it, the original stays put. `GET /api/jobs/{id}` reports progress; the web tray follows it.
+- Not yet: indexing (search), share links, zip downloads and phone sync pairs on a connected NAS.
+- Tests: `remote_test.go` runs the same checks against a real Samba server (`ci/smb-server.sh`, started in CI) and against a second Burrow over TLS with a pinned certificate: listing, range reads, thumbnails, refused paths, mkdir with parents, uploads with every conflict mode, renames that won't replace, moves both ways between libraries as jobs, trash, restore and purge, grants (no access, read-only), refused links, the wrong password, pin or token, and no plaintext secret in the database.
+
 ## 17. Roadmap
 
 1. The iPhone app on the shared core (iOS targets with CryptoKit and URLSession).

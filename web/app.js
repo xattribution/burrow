@@ -17,6 +17,7 @@ function h(tag, attrs, ...kids) {
 }
 const SVGNS = 'http://www.w3.org/2000/svg';
 const ICONS = {
+  nas: 'M4 4h16v7H4zM4 13h16v7H4zM7 7.5h.01M7 16.5h.01M11 7.5h6M11 16.5h6',
   folder: 'M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z',
   home: 'M4 10.5L12 4l8 6.5V20h-5.5v-5.5h-5V20H4z',
   chevron: 'M9.5 6l6 6-6 6',
@@ -257,7 +258,7 @@ async function loadNav() {
   navEl.replaceChildren(...[
     h('h3', {}, 'Library'),
     link('All libraries', 'folder', { view: 'browse', path: '' }, inLib && !s.path),
-    LIBS.map(l => h('div', { class: 'lib' }, link(l.name, 'folder', { view: 'browse', path: l.path }, inLib && (s.path === l.path || s.path.startsWith(l.path + '/'))))),
+    LIBS.map(l => h('div', { class: 'lib' }, link(l.name, l.remote ? 'nas' : 'folder', { view: 'browse', path: l.path }, inLib && (s.path === l.path || s.path.startsWith(l.path + '/'))))),
     favs.length ? h('h3', { class: 'lib' }, 'Favorites') : null,
     favs.map(f => h('div', { class: 'lib' }, link(f.name, f.dir ? 'folder' : f.kind || 'file', f.dir ? { view: 'browse', path: f.path } : { view: 'browse', path: parentOf(f.path), sel: f.path }, inLib && s.path === f.path))),
     link('Recently deleted', 'trash', { view: 'trash' }, s.view === 'trash'),
@@ -357,6 +358,7 @@ function highlight(text, terms) {
 }
 
 function kindIcon(e) {
+  if (e.remote) return icon('nas', 'k-folder');
   if (e.dir) return icon('folder', 'k-folder');
   if (e.kind === 'image' && ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(e.ext)) return h('img', { class: 'th', loading: 'lazy', alt: '', src: '/api/thumb?path=' + encodeURIComponent(e.path) });
   return icon(e.kind || 'file');
@@ -1157,6 +1159,8 @@ async function viewSettings(s, seq) {
     section('Libraries', `Top-level folders inside ${st.data_dir}. Only checked folders can be searched, browsed or shared.`,
       h('div', { class: 'checks' }, st.roots.map(r => h('label', {}, h('input', { type: 'checkbox', name: 'root', value: r.name, checked: r.enabled }), r.name))),
       f => api('/api/settings', { method: 'PUT', body: { roots: [...f.querySelectorAll('input[name=root]:checked')].map(i => i.value) } })),
+    section('Connected NAS', 'Other Burrow servers and SMB shares this Burrow reaches for you. Each shows up as a library; give people access to it in Users like any folder. Passwords and tokens are stored encrypted and never shown again. Search and share links cover this NAS only, for now.',
+      remotesEditor(), null),
     section('Hidden names', 'One name or pattern per line, matched against each file and folder name. * and ? work as wildcards. Matching items are skipped everywhere.',
       h('textarea', { name: 'ex', rows: 6, class: 'mono' }, st.excludes),
       f => api('/api/settings', { method: 'PUT', body: { excludes: f.ex.value } })),
@@ -1460,10 +1464,80 @@ async function moveInto(src, dest) {
   const st = h('span', { class: 'muted' }, 'Moving');
   uploadTray().append(h('li', {}, h('span', { class: 'label' }, `${name} to ${dest.split('/').pop()}`), st));
   try {
-    await api('/api/fs/move', { method: 'POST', body: { from: src, to: dest + '/' + name } });
-    st.textContent = 'Moved';
+    const r = await api('/api/fs/move', { method: 'POST', body: { from: src, to: dest + '/' + name } });
+    if (r.job) await followJob(r.job, st);
+    else st.textContent = 'Moved';
   } catch (x) { st.textContent = x.message; st.className = 'err'; }
   if (getState().sel === src) nav({ sel: '' }, true); else route();
+}
+
+// followJob shows a copy between libraries until it ends.
+async function followJob(id, st) {
+  const bar = h('progress', { max: 1, value: 0 });
+  st.before(bar);
+  for (;;) {
+    const j = await api('/api/jobs/' + id);
+    bar.max = j.total || 1; bar.value = j.done;
+    st.textContent = j.state === 'counting' ? 'Counting' : j.state === 'cleaning' ? 'Deleting the original'
+      : j.state === 'copying' ? `${fmtSize(j.done)} of ${fmtSize(j.total)}` : j.state === 'done' ? 'Moved' : '';
+    if (j.state === 'failed') throw new Error(j.error);
+    if (j.state === 'done') { bar.value = bar.max; return; }
+    await new Promise(r => setTimeout(r, 600));
+  }
+}
+
+// ---------- connected NAS ----------
+function remotesEditor() {
+  const list = h('div', { class: 'stack' });
+  const load = async () => {
+    let rs;
+    try { rs = await api('/api/remotes'); } catch (x) { put(list, h('p', { class: 'err' }, x.message)); return; }
+    put(list, rs.length ? h('table', { class: 'files' }, h('tbody', {}, rs.map(r => h('tr', {},
+      h('td', { class: 'name' }, h('span', {}, icon('nas', 'k-folder'), h('span', { class: 'label' }, r.name)),
+        h('span', { class: 'where' }, r.config.kind === 'smb' ? `SMB ${r.config.host}/${r.config.share}${r.config.folder ? '/' + r.config.folder : ''}` : `Burrow ${r.config.url}${r.config.folder ? ' / ' + r.config.folder : ''}`)),
+      h('td', { class: r.error ? 'err' : 'muted' }, r.error || 'Connected'),
+      h('td', { class: 'r' }, h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
+        const b = ev.currentTarget;
+        if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Remove ' + r.name; return; }
+        await api('/api/remotes/' + r.id, { method: 'DELETE' }); load(); loadNav();
+      } }, 'Remove')))))) : h('p', { class: 'muted' }, 'Nothing connected.'));
+  };
+  load();
+  const kind = h('select', { name: 'kind', 'aria-label': 'Kind' }, h('option', { value: 'smb' }, 'SMB share'), h('option', { value: 'burrow' }, 'Another Burrow'));
+  const field = (label, attrs, help) => h('label', { class: 'field' }, h('span', {}, label, help ? [' ', info(help)] : null), h('input', { autocomplete: 'off', spellcheck: 'false', ...attrs }));
+  const shares = h('datalist', { id: 'smb-shares' });
+  const smb = h('div', { class: 'grid2' },
+    field('Address', { name: 'host', placeholder: '192.168.1.20', class: 'mono' }),
+    field('Port', { name: 'port', type: 'number', min: 1, max: 65535, placeholder: '445' }),
+    field('User name', { name: 'user' }),
+    field('Password', { name: 'password', type: 'password', autocomplete: 'new-password' }),
+    h('label', { class: 'field' }, h('span', {}, 'Share'), h('span', { class: 'row' }, h('input', { name: 'share', list: 'smb-shares', autocomplete: 'off', placeholder: 'Media' }),
+      h('button', { class: 'btn', type: 'button', onclick: async () => {
+        err.textContent = '';
+        try { const names = await api('/api/remotes/shares', { method: 'POST', body: smbBody() }); shares.replaceChildren(...names.map(n => h('option', { value: n }))); if (names.length && !f.share.value) f.share.value = names[0]; } catch (x) { err.textContent = x.message; }
+      } }, 'Find shares')), shares),
+    field('Domain', { name: 'domain', placeholder: 'Optional' }));
+  const bur = h('div', { class: 'grid2', hidden: true },
+    field('Address', { name: 'url', placeholder: 'https://burrow.example.com', inputmode: 'url', class: 'mono' }),
+    field('API token', { name: 'token', type: 'password', autocomplete: 'off' }, 'Make one on that Burrow in Settings, MCP and API tokens, with API access on. It decides which of its folders this one reaches.'),
+    field('Certificate fingerprint', { name: 'pin', class: 'mono', placeholder: 'Only for a self-signed certificate' }, 'The SHA-256 fingerprint that Burrow prints in its log at startup.'));
+  const err = h('span', { class: 'err' });
+  const f = h('form', { class: 'stack' },
+    h('div', { class: 'grid2' }, field('Name', { name: 'name', required: true, placeholder: 'Office NAS' }, 'The library name people see. It can\u2019t be changed later.'), h('label', { class: 'field' }, h('span', {}, 'Kind'), kind)),
+    smb, bur, field('Start in folder', { name: 'folder', placeholder: 'Optional, e.g. Projects/2026', class: 'mono' }),
+    h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Connect'), err));
+  const smbBody = () => ({ host: f.host.value.trim(), port: Number(f.port.value) || 0, user: f.user.value, password: f.password.value, domain: f.domain.value });
+  kind.addEventListener('change', () => { smb.hidden = kind.value !== 'smb'; bur.hidden = kind.value !== 'burrow'; });
+  f.addEventListener('submit', async e => {
+    e.preventDefault(); err.textContent = '';
+    const body = { name: f.name.value.trim(), kind: kind.value, folder: f.folder.value.trim(),
+      ...(kind.value === 'smb' ? { ...smbBody(), share: f.share.value.trim() } : { url: f.url.value.trim(), token: f.token.value.trim(), pin: f.pin.value.trim() }) };
+    const b = f.querySelector('button[type=submit]');
+    b.disabled = true; b.textContent = 'Connecting';
+    try { await api('/api/remotes', { method: 'POST', body }); f.reset(); kind.dispatchEvent(new Event('change')); load(); loadNav(); } catch (x) { err.textContent = x.message; }
+    b.disabled = false; b.textContent = 'Connect';
+  });
+  return [list, f];
 }
 
 function newFolderControl(dir) {

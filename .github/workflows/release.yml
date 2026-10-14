@@ -14,6 +14,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
+      - name: Test SMB server, for the connected-NAS tests
+        run: |
+          sudo apt-get update -q > /dev/null && sudo apt-get install -y -q samba > /dev/null
+          sudo ci/smb-server.sh | sed 's/^export //' >> "$GITHUB_ENV"
       - run: go vet ./... && go test ./...
   image:
     needs: test

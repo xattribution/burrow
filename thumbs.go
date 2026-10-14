@@ -54,16 +54,7 @@ func (a *App) serveThumb(w http.ResponseWriter, r *http.Request, abs string, inf
 		http.NotFound(w, r)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(cache), 0o750); err == nil {
-		if tmp, err := os.CreateTemp(filepath.Dir(cache), ".tmp-*"); err == nil {
-			_, werr := tmp.Write(data)
-			if cerr := tmp.Close(); werr == nil && cerr == nil {
-				_ = os.Rename(tmp.Name(), cache)
-			} else {
-				_ = os.Remove(tmp.Name())
-			}
-		}
-	}
+	a.saveThumb(cache, data)
 	w.Header().Set("Content-Type", "image/jpeg")
 	_, _ = w.Write(data)
 }
@@ -109,12 +100,30 @@ func (a *App) pruneThumbs(maxAge time.Duration) {
 	})
 }
 
+func (a *App) saveThumb(cache string, data []byte) {
+	if err := os.MkdirAll(filepath.Dir(cache), 0o750); err == nil {
+		if tmp, err := os.CreateTemp(filepath.Dir(cache), ".tmp-*"); err == nil {
+			_, werr := tmp.Write(data)
+			if cerr := tmp.Close(); werr == nil && cerr == nil {
+				_ = os.Rename(tmp.Name(), cache)
+			} else {
+				_ = os.Remove(tmp.Name())
+			}
+		}
+	}
+}
+
 func (a *App) makeThumb(abs string) ([]byte, error) {
 	f, err := a.openNoFollow(abs)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	return a.thumbFrom(f, abs)
+}
+
+// thumbFrom makes a thumbnail from a picture named name.
+func (a *App) thumbFrom(f io.ReadSeeker, name string) ([]byte, error) {
 	br := bufio.NewReaderSize(f, 1<<16)
 	cfg, _, err := image.DecodeConfig(br)
 	if err != nil {
@@ -127,7 +136,7 @@ func (a *App) makeThumb(abs string) ([]byte, error) {
 		return nil, err
 	}
 	orient := 1
-	if strings.HasSuffix(strings.ToLower(abs), ".jpg") || strings.HasSuffix(strings.ToLower(abs), ".jpeg") {
+	if strings.HasSuffix(strings.ToLower(name), ".jpg") || strings.HasSuffix(strings.ToLower(name), ".jpeg") {
 		head := make([]byte, 128<<10)
 		n, _ := io.ReadFull(f, head)
 		orient = exifOrientation(head[:n])

@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -614,7 +615,19 @@ func (a *App) cleanGrants(gs []Grant) ([]Grant, error) {
 	}
 	clean := map[string]Grant{}
 	for _, g := range gs {
-		_, rel, err := a.resolve(g.Path)
+		var rel string
+		var err error
+		if l, inner, ok := a.remoteOf(g.Path); ok {
+			// a connected NAS: the path must be plain, and there unless it's offline
+			rel = cleanRel(g.Path)
+			if !a.remotePathOK(inner) {
+				err = errNotAllowed
+			} else if serr := l.do(func(c remoteFS) error { _, e := c.Stat(inner); return e }); errors.Is(serr, fs.ErrNotExist) {
+				err = serr
+			}
+		} else {
+			_, rel, err = a.resolve(g.Path)
+		}
 		if err != nil {
 			return nil, errors.New("not a library folder: " + g.Path)
 		}
