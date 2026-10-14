@@ -31,3 +31,4 @@
 .foot { margin-top: 28px; font-size: 13px; }
 @media (max-width: 560px) { .hide-s { display: none; } .share { padding-top: 20px; } }
 .up-h { font-size: 17px; margin: 28px 0 10px; }
+.k-folder { color: var(--accent); fill: var(--accent); } /* ledger: filled folder in the accent, same as the app */

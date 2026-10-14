@@ -8,6 +8,8 @@ import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
+import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -41,7 +43,11 @@ fun BurrowUi(pairLink: String?, onLinkUsed: () -> Unit) {
     }
     var dest by rememberSaveable { mutableStateOf(Dest.FILES) }
     // bottom bar on a phone or folded screen, a rail when unfolded or on a tablet
+    // the bar sits on the same black as the screen; only the selected item is marked
+    val black = MaterialTheme.colorScheme.background
     NavigationSuiteScaffold(
+        containerColor = black,
+        navigationSuiteColors = NavigationSuiteDefaults.colors(navigationBarContainerColor = black, navigationRailContainerColor = black),
         navigationSuiteItems = {
             Dest.entries.forEach { d ->
                 item(selected = d == dest, onClick = { dest = d }, icon = { Icon(d.icon, contentDescription = null) }, label = { Text(d.label) })

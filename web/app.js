@@ -18,6 +18,8 @@ function h(tag, attrs, ...kids) {
 const SVGNS = 'http://www.w3.org/2000/svg';
 const ICONS = {
   folder: 'M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z',
+  home: 'M4 10.5L12 4l8 6.5V20h-5.5v-5.5h-5V20H4z',
+  chevron: 'M9.5 6l6 6-6 6',
   file: 'M6 3h8l4 4v14H6zM14 3v4h4',
   image: 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15 9.5a1.5 1.5 0 1 0 0-.01',
   video: 'M3 6h13v12H3zM16 10l5-3v10l-5-3',
@@ -309,14 +311,15 @@ async function viewBrowse(s, seq) {
   const data = await api('/api/ls?path=' + encodeURIComponent(s.path));
   if (seq !== routeSeq) return;
   const crumbs = h('nav', { class: 'crumbs', 'aria-label': 'Folder path' });
-  crumbs.append(s.path ? h('a', { href: '?', onclick: e => { e.preventDefault(); nav({ path: '', sel: '' }); } }, 'Libraries') : h('b', {}, 'Libraries'));
+  const home = [icon('home', 'home'), h('span', { class: 'home-label' }, 'Libraries')];
+  crumbs.append(s.path ? h('a', { href: '?', 'aria-label': 'Libraries', onclick: e => { e.preventDefault(); nav({ path: '', sel: '' }); } }, home) : h('b', { 'aria-current': 'page' }, home));
   let acc = '';
   const segs = s.path ? s.path.split('/') : [];
   segs.forEach((seg, i) => {
     acc = acc ? acc + '/' + seg : seg;
     const p = acc;
-    crumbs.append(h('span', { class: 'sep' }, '/'));
-    crumbs.append(i === segs.length - 1 ? h('b', {}, seg) : h('a', { href: '?path=' + encodeURIComponent(p), onclick: e => { e.preventDefault(); nav({ path: p, sel: '' }); } }, seg));
+    crumbs.append(icon('chevron', 'sep'));
+    crumbs.append(i === segs.length - 1 ? h('b', { 'aria-current': 'page' }, seg) : h('a', { href: '?path=' + encodeURIComponent(p), onclick: e => { e.preventDefault(); nav({ path: p, sel: '' }); } }, seg));
   });
   const actions = s.path && (data.can_share || data.can_write) ? h('div', { class: 'row' },
     data.can_write ? uploadButton(s.path) : null,
@@ -370,12 +373,12 @@ function fileTable(entries, { search, terms = [] }) {
         h('span', {}, kindIcon(e),
           e.dir ? h('a', { class: 'label', href: '?path=' + encodeURIComponent(e.path), onclick: ev => { ev.preventDefault(); openEntry(e); } }, name) : h('span', { class: 'label' }, name),
           h('span', { class: 'flags' }, e.shared ? h('span', { title: `${e.shared} active link${e.shared > 1 ? 's' : ''}` }, icon('link')) : null, e.fav ? h('span', { title: 'Favorite' }, icon('star')) : null)),
-        search ? h('span', { class: 'where' }, highlight(parentOf(e.path) || '/', terms)) : null),
+        search ? h('span', { class: 'where' }, highlight(parentOf(e.path) || '/', terms)) : h('span', { class: 'where phone-meta' }, e.dir ? fmtDate(e.mtime) : `${fmtSize(e.size)}, ${fmtDate(e.mtime)}`)),
       h('td', { class: 'r num muted' }, e.dir ? '' : fmtSize(e.size)),
       h('td', { class: 'r num muted hide-s' }, fmtDate(e.mtime)));
     tb.append(tr);
   }
-  return h('table', { class: 'files' },
+  return h('table', { class: search ? 'files' : 'files browse' },
     h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', { class: 'r' }, 'Size'), h('th', { class: 'r hide-s' }, 'Modified'))), tb);
 }
 

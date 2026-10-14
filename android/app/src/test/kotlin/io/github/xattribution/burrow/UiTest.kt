@@ -14,6 +14,8 @@ import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import com.github.takahirom.roborazzi.captureRoboImage
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.test.captureToImage
 import io.github.xattribution.burrow.ui.MainActivity
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
@@ -113,6 +115,17 @@ class UiTest {
         waitFor("Link ready")
         shot("phone-link-ready")
         assertTrue(server.web("GET", "/api/shares").contains("DOCS/recipes.md"))
+    }
+
+    @Test
+    fun phoneDarkIsTrueBlack() {
+        pairAt("w411dp-h914dp-port-night-xxhdpi")
+        compose.onNodeWithText("DOCS").performClick()
+        waitFor("recipes.md")
+        shot("phone-dark-folder")
+        // OLED: the screen behind the list is pixels-off black
+        val img = compose.onRoot().captureToImage().asAndroidBitmap()
+        assertEquals(android.graphics.Color.BLACK, img.getPixel(img.width / 2, img.height * 3 / 4))
     }
 
     @Test
