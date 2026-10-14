@@ -17,6 +17,8 @@ import com.github.takahirom.roborazzi.captureRoboImage
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.captureToImage
 import io.github.xattribution.burrow.ui.MainActivity
+import io.github.xattribution.burrow.data.RemoteFileProvider
+import io.github.xattribution.burrow.ui.files.DragDrop
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -126,6 +128,37 @@ class UiTest {
         // OLED: the screen behind the list is pixels-off black
         val img = compose.onRoot().captureToImage().asAndroidBitmap()
         assertEquals(android.graphics.Color.BLACK, img.getPixel(img.width / 2, img.height * 3 / 4))
+    }
+
+    @Test
+    fun dragOutStreamsFromTheNas() {
+        pairAt(PHONE)
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val body = File(server.lib, "DOCS/recipes.md").readBytes()
+        val e = io.github.xattribution.burrow.core.Entry(path = "DOCS/recipes.md", name = "recipes.md", size = body.size.toLong())
+        // the address another app gets, and what it learns from it without a download
+        val uri = RemoteFileProvider.uriFor(ctx, e)
+        val f = RemoteFileProvider.parse(uri)!!
+        assertEquals(e.path, f.path)
+        val provider = org.robolectric.Robolectric.buildContentProvider(RemoteFileProvider::class.java).create(RemoteFileProvider.authority(ctx)).get()
+        provider.query(uri, null, null, null, null).use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals("recipes.md", c.getString(c.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME)))
+            assertEquals(body.size.toLong(), c.getLong(c.getColumnIndexOrThrow(android.provider.OpenableColumns.SIZE)))
+        }
+        // reading streams from Burrow: in order, then a jump back, then past the end
+        val r = RemoteFileProvider.Reader(ctx.graph.connection, f)
+        val buf = ByteArray(8)
+        assertEquals(8, r.onRead(0, 8, buf)); assertEquals(String(body, 0, 8), String(buf))
+        assertEquals(8, r.onRead(8, 8, buf)); assertEquals(String(body, 8, 8), String(buf))
+        assertEquals(6, r.onRead(2, 6, buf)); assertEquals(String(body, 2, 6), String(buf, 0, 6))
+        assertEquals(0, r.onRead(body.size.toLong(), 8, buf))
+        r.onRelease()
+        // drops that would do nothing or loop are refused
+        assertTrue(DragDrop.canMove("DOCS/recipes.md", "DOCS/Manuals"))
+        assertTrue(!DragDrop.canMove("DOCS/recipes.md", "DOCS"))
+        assertTrue(!DragDrop.canMove("DOCS/Manuals", "DOCS/Manuals"))
+        assertTrue(!DragDrop.canMove("DOCS/Manuals", "DOCS/Manuals/old"))
     }
 
     @Test

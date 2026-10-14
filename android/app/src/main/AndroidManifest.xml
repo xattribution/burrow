@@ -79,6 +79,13 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- NAS files dragged out to other apps; readable only with the drag's grant -->
+        <provider
+            android:name=".data.RemoteFileProvider"
+            android:authorities="${applicationId}.remote"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"

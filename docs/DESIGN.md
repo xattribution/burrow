@@ -464,12 +464,14 @@ The QR code carries the home address (`lan_url`, or the address the browser used
 - No plain HTTP (network security config), no user-added certificate authorities.
 - QR codes are read on the phone with ZXing, without Google Play services.
 - Files handed over by other apps (share menu, drag and drop) are copied into the app's cache first, because that access ends when the screen closes; the copy is deleted once sent.
+- Files dragged out of the app are `content://` addresses served by `RemoteFileProvider`. It isn't exported, so another app can read an address only with the grant that comes with the drag (`DRAG_FLAG_GLOBAL_URI_READ`). Reads go through a seekable proxy file descriptor that streams over the device channel, keeps one stream open while reads are in order, and reopens with a range request when the reader jumps. Folders only drag within the app, to be moved.
+- Drag and drop on both web and phone uses one rule for where things can go: not into the folder they're already in, onto themselves, or into their own subfolders. The folder under the drag turns solid accent and a pill names the action (Upload to, Move to).
 
 ### Tests
 - `devices_test.go`, `writes_test.go`: pairing, handshakes, replay, tampering, truncation, what a recording proxy sees (no paths, names, contents or methods), revocation, disabled accounts, the public port and the admin list; mkdir, moves that carry grants and links, carve-out protection, trash and its purge, resumable uploads with a crash tail, checksums, every conflict mode, read-only mounts, sync listings and hashes, an upload through the channel.
 - `android/shared` (JVM, against the real server): interop, address fallback, pinning, a fake server, revocation, restart recovery; the sync engine in all three modes, conflicts, deletes, moves and a resumed upload.
-- `android/app` (Robolectric, against the real server): pairing from a link and using the app at phone, folded cover screen, unfolded and tablet sizes, with screenshots; a removed phone returning to pairing.
-- CI also runs the app on an Android emulator: the Keystore, a photo backup from the media library, background sync through WorkManager, and the R8-shrunk release build paired and browsed through its own screens.
+- `android/app` (Robolectric, against the real server): pairing from a link and using the app at phone, folded cover screen, unfolded and tablet sizes, with screenshots; a removed phone returning to pairing; a dragged-out file's address, its name and size, and in-order and seeking reads streamed from the server.
+- CI also runs the app on an Android emulator: the Keystore, a photo backup from the media library, the backed-up photo read back through its drag-out address with seeking, background sync through WorkManager, and the R8-shrunk release build paired and browsed through its own screens.
 
 ## 17. Roadmap
 
