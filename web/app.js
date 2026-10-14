@@ -287,6 +287,7 @@ async function route() {
   const seq = ++routeSeq;
   const q = $('#q');
   if (q && document.activeElement !== q) q.value = s.view === 'search' ? s.q : '';
+  delete $('#content').dataset.drop;
   loadNav();
   try {
     if (s.view === 'search') await viewSearch(s, seq);
@@ -319,7 +320,7 @@ async function viewBrowse(s, seq) {
     acc = acc ? acc + '/' + seg : seg;
     const p = acc;
     crumbs.append(icon('chevron', 'sep'));
-    crumbs.append(i === segs.length - 1 ? h('b', { 'aria-current': 'page' }, seg) : h('a', { href: '?path=' + encodeURIComponent(p), onclick: e => { e.preventDefault(); nav({ path: p, sel: '' }); } }, seg));
+    crumbs.append(i === segs.length - 1 ? h('b', { 'aria-current': 'page' }, seg) : h('a', { href: '?path=' + encodeURIComponent(p), 'data-drop': p, onclick: e => { e.preventDefault(); nav({ path: p, sel: '' }); } }, seg));
   });
   const actions = s.path && (data.can_share || data.can_write) ? h('div', { class: 'row' },
     data.can_write ? uploadButton(s.path) : null,
@@ -327,6 +328,7 @@ async function viewBrowse(s, seq) {
     data.can_share ? h('button', { class: 'btn', onclick: () => nav({ sel: s.path }) }, icon('link'), 'Share this folder') : null) : null;
   put($('#sub'), crumbs, h('span', { class: 'grow' }), actions);
   CURRENT = data.entries;
+  if (data.can_write && s.path) $('#content').dataset.drop = s.path;
   put($('#content'), fileTable(data.entries, { search: false }) || (s.path ? emptyState('This folder is empty.')
     : ME.admin ? emptyState('No libraries are enabled.', 'Pick folders in Settings.') : emptyState('No folders are shared with you yet.', 'Ask an admin for access.')));
 }
@@ -367,6 +369,7 @@ function fileTable(entries, { search, terms = [] }) {
   for (const e of entries) {
     const name = search ? highlight(e.name, terms) : [e.name];
     const tr = h('tr', { 'aria-selected': s.sel === e.path ? 'true' : 'false', 'data-path': e.path, tabindex: '-1',
+      'data-drop': e.dir ? e.path : null, draggable: e.path.includes('/') ? 'true' : null, ondragstart: ev => dragOut(ev, e),
       onclick: ev => { if (ev.target.closest('a')) return; nav({ sel: e.path }, true); },
       ondblclick: () => openEntry(e) },
       h('td', { class: 'name' },
@@ -1309,22 +1312,25 @@ function uploadTray() {
   let t = $('#tray');
   if (!t) {
     t = h('div', { class: 'tray', id: 'tray', role: 'status' },
-      h('div', { class: 'row' }, h('b', {}, 'Uploads'), h('span', { class: 'grow' }), h('button', { class: 'iconbtn', 'aria-label': 'Close', onclick: () => t.remove() }, icon('x'))),
+      h('div', { class: 'row' }, h('b', {}, 'Transfers'), h('span', { class: 'grow' }), h('button', { class: 'iconbtn', 'aria-label': 'Close', onclick: () => t.remove() }, icon('x'))),
       h('ul', {}));
     document.body.append(t);
   }
   return $('ul', t);
 }
 
+// files are File objects for dir itself, or { f, dir } for files inside dropped folders
 async function uploadFiles(dir, files) {
   const list = uploadTray();
-  const rows = files.map(f => {
+  const rows = files.map(x => {
+    const f = x instanceof File ? x : x.f;
+    const d = x instanceof File ? dir : x.dir;
     const bar = h('progress', { max: f.size || 1, value: 0 });
     const st = h('span', { class: 'muted' }, 'Waiting');
-    list.append(h('li', {}, h('span', { class: 'label' }, f.name), bar, st));
-    return { f, bar, st };
+    list.append(h('li', {}, h('span', { class: 'label' }, d === dir ? f.name : d.slice(dir.length + 1) + '/' + f.name), bar, st));
+    return { f, dir: d, bar, st };
   });
-  for (const { f, bar, st } of rows) {
+  for (const { f, dir, bar, st } of rows) {
     try {
       st.textContent = 'Sending';
       const up = await api('/api/uploads', { method: 'POST', body: { dir, name: f.name, size: f.size, mtime: f.lastModified } });
@@ -1349,6 +1355,115 @@ async function uploadFiles(dir, files) {
     } catch (x) { st.textContent = x.message; st.className = 'err'; }
   }
   route();
+}
+
+// ---------- drag and drop ----------
+// Anything with data-drop="<folder>" takes drops: the folder you're in, folder
+// rows and the path bar. Files from the computer are uploaded there; rows
+// dragged inside Burrow are moved there; a file dragged out of the window to
+// the desktop is downloaded (Chrome and Edge).
+const MOVE_TYPE = 'application/x-burrow-path';
+let dragging = null;
+let marked = null;
+
+function dragOut(ev, e) {
+  dragging = e;
+  ev.currentTarget.classList.add('dragging');
+  const dt = ev.dataTransfer;
+  dt.effectAllowed = 'copyMove';
+  dt.setData(MOVE_TYPE, e.path);
+  dt.setData('text/plain', e.name);
+  if (!e.dir) dt.setData('DownloadURL', `application/octet-stream:${e.name.replaceAll(':', '_')}:${location.origin}/api/raw?dl=1&path=${encodeURIComponent(e.path)}`);
+}
+
+function dropKind(dt) {
+  const types = [...(dt?.types || [])];
+  if (types.includes(MOVE_TYPE)) return 'move'; // checked first: a dragged thumbnail also carries Files
+  if (types.includes('Files')) return 'upload';
+  return null;
+}
+
+function canMove(src, dest) { return !src || (dest !== parentOf(src) && dest !== src && !dest.startsWith(src + '/')); }
+
+function markDrop(el, text) {
+  if (marked !== el) {
+    clearDropMark();
+    marked = el;
+    el.classList.add('drop-on');
+  }
+  let hint = $('#drophint');
+  if (!hint) document.body.append(hint = h('div', { id: 'drophint', class: 'drophint', role: 'status' }));
+  hint.textContent = text;
+}
+
+function clearDropMark() {
+  marked?.classList.remove('drop-on');
+  marked = null;
+  $('#drophint')?.remove();
+}
+
+document.addEventListener('dragover', ev => {
+  const kind = dropKind(ev.dataTransfer);
+  if (!kind) return;
+  ev.preventDefault(); // otherwise the browser opens a file dropped next to a target
+  const t = ev.target.closest?.('[data-drop]');
+  const dest = t?.dataset.drop;
+  const ok = !!dest && (kind === 'upload' || canMove(dragging?.path, dest));
+  ev.dataTransfer.dropEffect = ok ? (kind === 'move' ? 'move' : 'copy') : 'none';
+  if (ok) markDrop(t, `${kind === 'move' ? 'Move' : 'Upload'} to ${dest.split('/').pop()}`);
+  else clearDropMark();
+});
+document.addEventListener('dragleave', ev => { if (!ev.relatedTarget) clearDropMark(); });
+document.addEventListener('dragend', () => { dragging = null; clearDropMark(); document.querySelectorAll('.dragging').forEach(x => x.classList.remove('dragging')); });
+document.addEventListener('drop', ev => {
+  const kind = dropKind(ev.dataTransfer);
+  if (!kind) return;
+  ev.preventDefault();
+  const dest = ev.target.closest?.('[data-drop]')?.dataset.drop;
+  clearDropMark();
+  if (!dest) return;
+  if (kind === 'move') {
+    const src = ev.dataTransfer.getData(MOVE_TYPE);
+    dragging = null;
+    if (src && canMove(src, dest)) moveInto(src, dest);
+    return;
+  }
+  // folder entries have to be taken before this handler returns
+  const items = [...ev.dataTransfer.items].filter(i => i.kind === 'file').map(i => i.webkitGetAsEntry?.() || i.getAsFile());
+  uploadDropped(dest, items);
+});
+
+async function uploadDropped(dest, items) {
+  const files = [], dirs = [];
+  const read = r => new Promise((res, rej) => r.readEntries(res, rej));
+  const walk = async (entry, dir) => {
+    if (entry instanceof File) { files.push({ f: entry, dir }); return; }
+    if (entry.isFile) { files.push({ f: await new Promise((res, rej) => entry.file(res, rej)), dir }); return; }
+    if (!entry.isDirectory) return;
+    const sub = dir + '/' + entry.name;
+    dirs.push(sub);
+    const r = entry.createReader();
+    for (let batch; (batch = await read(r)).length;) for (const c of batch) await walk(c, sub);
+  };
+  try {
+    for (const it of items) if (it) await walk(it, dest);
+    for (const d of dirs) await api('/api/fs/mkdir', { method: 'POST', body: { path: d, parents: true } });
+  } catch (x) {
+    uploadTray().append(h('li', {}, h('span', { class: 'label' }, 'Couldn’t read the dropped folders'), h('span', { class: 'err' }, x.message)));
+    return;
+  }
+  if (files.length) uploadFiles(dest, files); else route();
+}
+
+async function moveInto(src, dest) {
+  const name = src.split('/').pop();
+  const st = h('span', { class: 'muted' }, 'Moving');
+  uploadTray().append(h('li', {}, h('span', { class: 'label' }, `${name} to ${dest.split('/').pop()}`), st));
+  try {
+    await api('/api/fs/move', { method: 'POST', body: { from: src, to: dest + '/' + name } });
+    st.textContent = 'Moved';
+  } catch (x) { st.textContent = x.message; st.className = 'err'; }
+  if (getState().sel === src) nav({ sel: '' }, true); else route();
 }
 
 function newFolderControl(dir) {

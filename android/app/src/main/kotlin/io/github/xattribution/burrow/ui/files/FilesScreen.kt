@@ -2,17 +2,20 @@
 
 package io.github.xattribution.burrow.ui.files
 
-import android.app.Activity
 import android.content.Intent
 import android.net.Uri
-import android.view.DragEvent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.draganddrop.dragAndDropSource
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.foundation.border
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -93,10 +96,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draganddrop.DragAndDropEvent
-import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.mimeTypes
-import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -112,7 +112,6 @@ import io.github.xattribution.burrow.ui.common.EmptyState
 import io.github.xattribution.burrow.ui.common.Load
 import io.github.xattribution.burrow.ui.common.formatSize
 import io.github.xattribution.burrow.ui.common.kindIcon
-import io.github.xattribution.burrow.work.stageForUpload
 import kotlinx.coroutines.launch
 
 /**
@@ -199,24 +198,10 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
         if (uris.isNotEmpty()) vm.message.value = "Sending ${uris.size} file${if (uris.size == 1) "" else "s"} to ${path.substringAfterLast('/')}"
     }
 
-    // files dragged in from another app (split screen, a foldable's other half) are uploaded here
-    val dropTarget = remember(path, canWrite) {
-        object : DragAndDropTarget {
-            override fun onDrop(event: DragAndDropEvent): Boolean {
-                val de: DragEvent = event.toAndroidDragEvent()
-                (ctx as? Activity)?.requestDragAndDropPermissions(de)
-                val clip = de.clipData ?: return false
-                var n = 0
-                for (i in 0 until clip.itemCount) {
-                    val u = clip.getItemAt(i).uri ?: continue
-                    ctx.graph.transfers.upload(stageForUpload(ctx, u), path)
-                    n++
-                }
-                if (n > 0) vm.message.value = "Sending $n file${if (n == 1) "" else "s"} here"
-                return n > 0
-            }
-        }
-    }
+    val scope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
+    val dd = remember { DragDrop(ctx, scope, vm) { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } }
+    val paneTarget = remember(path, canWrite) { dd.target(path, enabled = canWrite && path.isNotEmpty()) }
 
     // the folder name starts large and collapses into the bar as the list scrolls, like the system apps
     val collapse = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -265,7 +250,9 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
         snackbarHost = { SnackbarHost(snack) },
     ) { pad ->
         Box(
-            Modifier.padding(pad).fillMaxSize().let { if (canWrite) it.dragAndDropTarget(shouldStartDragAndDrop = { e -> e.mimeTypes().isNotEmpty() }, target = dropTarget) else it },
+            Modifier.padding(pad).fillMaxSize()
+                .dragAndDropTarget(shouldStartDragAndDrop = { e -> e.mimeTypes().isNotEmpty() }, target = paneTarget)
+                .let { if (dd.over == path && path.isNotEmpty()) it.border(3.dp, MaterialTheme.colorScheme.primary) else it },
         ) {
             val r = results
             when {
@@ -273,21 +260,22 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
                     is Load.Loading -> Busy()
                     is Load.Failed -> EmptyState(Icons.Outlined.WifiOff, r.message, action = "Try again") { vm.search(query) }
                     is Load.Ready -> if (r.value.entries.isEmpty()) EmptyState(Icons.Outlined.SearchOff, "Nothing matches “$query”", "Every word has to appear somewhere in the path.")
-                    else EntryList(r.value.entries, grid = false, selected = selected, showWhere = true, onOpen = open)
+                    else EntryList(r.value.entries, grid = false, selected = selected, showWhere = true, dd = dd, onOpen = open)
                 }
                 searching -> EmptyState(Icons.Outlined.Search, "Search Burrow", "Type part of any file or folder name. ext:pdf and type:video narrow it down.")
                 else -> when (val l = listing) {
                     is Load.Loading -> Busy()
                     is Load.Failed -> EmptyState(Icons.Outlined.WifiOff, l.message, action = "Try again") { vm.refresh() }
                     is Load.Ready -> Column {
-                        if (path.isNotEmpty()) Crumbs(path) { vm.open(it) }
+                        if (path.isNotEmpty()) Crumbs(path, dd) { vm.open(it) }
                         if (path.isEmpty() && favorites.isNotEmpty()) Favorites(favorites, open)
                         if (l.value.entries.isEmpty()) {
                             EmptyState(Icons.Outlined.Folder, if (path.isEmpty()) "No folders yet" else "This folder is empty", if (path.isEmpty()) "Ask an admin to give you access to a folder." else if (canWrite) "Upload files or drag them here." else null)
-                        } else EntryList(l.value.entries, grid = grid, selected = selected, showWhere = false, onOpen = open)
+                        } else EntryList(l.value.entries, grid = grid, selected = selected, showWhere = false, dd = dd, onOpen = open)
                     }
                 }
             }
+            dd.hint?.let { DropHint(it, Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp)) }
         }
     }
     if (shareFolder) io.github.xattribution.burrow.ui.links.NewLinkSheet(path = path, onDismiss = { shareFolder = false }, onCreated = { vm.refresh() })
@@ -305,7 +293,7 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
 
 /** The path as a pill: home, then each folder; the folder you're in is in the accent color. */
 @Composable
-private fun Crumbs(path: String, onOpen: (String) -> Unit) {
+private fun Crumbs(path: String, dd: DragDrop?, onOpen: (String) -> Unit) {
     val segs = path.split('/')
     val scroll = rememberScrollState()
     LaunchedEffect(path) { scroll.scrollTo(scroll.maxValue) }
@@ -320,12 +308,17 @@ private fun Crumbs(path: String, onOpen: (String) -> Unit) {
             Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             val last = i == segs.size - 1
             val target = segs.take(i + 1).joinToString("/")
+            val lit = dd?.over == target && !last
             Text(
                 s, maxLines = 1,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = if (last) FontWeight.SemiBold else FontWeight.Normal,
-                color = if (last) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.clip(CircleShape).let { if (last) it else it.combinedClickable(onClick = { onOpen(target) }) }.padding(horizontal = 10.dp, vertical = 12.dp),
+                color = when { lit -> MaterialTheme.colorScheme.onPrimary; last -> MaterialTheme.colorScheme.primary; else -> MaterialTheme.colorScheme.onSurfaceVariant },
+                modifier = Modifier.clip(CircleShape)
+                    .let { if (last) it else it.combinedClickable(onClick = { onOpen(target) }) }
+                    .let { if (dd == null || last) it else it.dragAndDropTarget(shouldStartDragAndDrop = { e -> e.mimeTypes().isNotEmpty() }, target = remember(target) { dd.target(target) }) }
+                    .let { if (lit) it.background(MaterialTheme.colorScheme.primary) else it }
+                    .padding(horizontal = 10.dp, vertical = 12.dp),
             )
         }
         Spacer(Modifier.width(8.dp))
@@ -342,15 +335,15 @@ private fun Favorites(favs: List<Entry>, onOpen: (Entry) -> Unit) {
 }
 
 @Composable
-fun EntryList(entries: List<Entry>, grid: Boolean, selected: String?, showWhere: Boolean, onOpen: (Entry) -> Unit) {
+fun EntryList(entries: List<Entry>, grid: Boolean, selected: String?, showWhere: Boolean, dd: DragDrop? = null, onOpen: (Entry) -> Unit) {
     if (grid) {
         LazyVerticalGrid(columns = GridCells.Adaptive(112.dp), modifier = Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp)) {
-            items(entries, key = { it.path }) { e -> Tile(e, e.path == selected) { onOpen(e) } }
+            items(entries, key = { it.path }) { e -> Tile(e, e.path == selected, dd?.over == e.path, Modifier.draggable(e, dd)) { onOpen(e) } }
         }
     } else {
         LazyColumn(Modifier.fillMaxSize()) {
             items(entries, key = { it.path }) { e ->
-                EntryRow(e, e.path == selected, showWhere) { onOpen(e) }
+                EntryRow(e, e.path == selected, showWhere, dd?.over == e.path, Modifier.draggable(e, dd)) { onOpen(e) }
                 if (e != entries.last()) HorizontalDivider(Modifier.padding(start = 88.dp, end = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
@@ -358,12 +351,14 @@ fun EntryList(entries: List<Entry>, grid: Boolean, selected: String?, showWhere:
 }
 
 @Composable
-private fun EntryRow(e: Entry, selected: Boolean, showWhere: Boolean, onClick: () -> Unit) {
+private fun EntryRow(e: Entry, selected: Boolean, showWhere: Boolean, lit: Boolean, drag: Modifier, onClick: () -> Unit) {
     val ctx = LocalContext.current
+    val cs = MaterialTheme.colorScheme
     ListItem(
-        modifier = Modifier.combinedClickable(onClick = onClick).padding(vertical = 4.dp),
-        colors = ListItemDefaults.colors(containerColor = if (selected) MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent),
-        leadingContent = { Leading(e, 48) },
+        modifier = drag.combinedClickable(onClick = onClick).padding(vertical = 4.dp),
+        colors = if (lit) ListItemDefaults.colors(containerColor = cs.primary, headlineColor = cs.onPrimary, supportingColor = cs.onPrimary, trailingIconColor = cs.onPrimary)
+        else ListItemDefaults.colors(containerColor = if (selected) cs.surfaceContainerHigh else Color.Transparent),
+        leadingContent = { Leading(e, 48, if (lit) cs.onPrimary else null) },
         headlineContent = { Text(e.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         supportingContent = {
             Column {
@@ -379,25 +374,47 @@ private fun EntryRow(e: Entry, selected: Boolean, showWhere: Boolean, onClick: (
 }
 
 @Composable
-private fun Tile(e: Entry, selected: Boolean, onClick: () -> Unit) {
+private fun Tile(e: Entry, selected: Boolean, lit: Boolean, drag: Modifier, onClick: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
     Column(
-        Modifier.padding(4.dp).clip(RoundedCornerShape(12.dp)).combinedClickable(onClick = onClick)
-            .background(if (selected) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainerLow),
+        Modifier.padding(4.dp).clip(RoundedCornerShape(12.dp)).then(drag).combinedClickable(onClick = onClick)
+            .background(when { lit -> cs.primary; selected -> cs.surfaceContainerHighest; else -> cs.surfaceContainerLow }),
     ) {
-        Box(Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.Center) { Leading(e, 0) }
-        Text(e.name, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(8.dp))
+        Box(Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.Center) { Leading(e, 0, if (lit) cs.onPrimary else null) }
+        Text(e.name, style = MaterialTheme.typography.labelMedium, color = if (lit) cs.onPrimary else Color.Unspecified, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(8.dp))
     }
 }
 
 /** A thumbnail for pictures, an icon for everything else. size 0 fills the space. */
 @Composable
-private fun Leading(e: Entry, size: Int) {
+private fun Leading(e: Entry, size: Int, tint: Color? = null) {
     val m = if (size > 0) Modifier.size(size.dp).clip(RoundedCornerShape(8.dp)) else Modifier.fillMaxSize()
     if (!e.dir && e.kind == "image") {
         AsyncImage(model = ThumbFetcher.Thumb(e.path, e.mtime), contentDescription = null, contentScale = ContentScale.Crop, modifier = m.background(MaterialTheme.colorScheme.surfaceVariant))
     } else {
         Box(m, contentAlignment = Alignment.Center) {
-            Icon(if (e.dir) Icons.Filled.Folder else kindIcon(e.kind, false), null, Modifier.size(if (size > 0) 36.dp else 48.dp), tint = if (e.dir) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(if (e.dir) Icons.Filled.Folder else kindIcon(e.kind, false), null, Modifier.size(if (size > 0) 36.dp else 48.dp), tint = tint ?: if (e.dir) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+/** Hold to drag; folders also take drops. Dims while it's the thing being dragged. */
+@Composable
+private fun Modifier.draggable(e: Entry, dd: DragDrop?): Modifier {
+    if (dd == null || !e.path.contains('/')) return this
+    return this
+        .let { if (dd.lifted == e.path) it.alpha(0.45f) else it }
+        .dragAndDropSource { _ -> dd.transfer(e) }
+        .let { if (e.dir) it.dragAndDropTarget(shouldStartDragAndDrop = { ev -> ev.mimeTypes().isNotEmpty() }, target = remember(e.path) { dd.target(e.path) }) else it }
+}
+
+/** Where a drop goes, as a solid pill like the system's drag badge. */
+@Composable
+private fun DropHint(text: String, modifier: Modifier) {
+    Text(
+        text, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.onPrimary,
+        modifier = modifier.clip(CircleShape).background(MaterialTheme.colorScheme.primary).padding(horizontal = 20.dp, vertical = 12.dp),
+    )
 }

@@ -70,6 +70,23 @@ class DeviceTest {
         val remote = "PHOTOS/ci-$stamp/Pictures/BurrowTest/ci-$stamp.jpg"
         g.connection.use { api -> api.raw(remote).use { assertArrayEquals(photo, it.body.readByteArray()) } }
 
+        // the same file dragged out to another app: read through the content address, seeking as a player would
+        val uri = io.github.xattribution.burrow.data.RemoteFileProvider.uriFor(app, io.github.xattribution.burrow.core.Entry(path = remote, name = "ci-$stamp.jpg", size = photo.size.toLong()))
+        assertEquals("image/jpeg", app.contentResolver.getType(uri))
+        app.contentResolver.openFileDescriptor(uri, "r")!!.use { pfd ->
+            assertEquals(photo.size.toLong(), pfd.statSize)
+            java.io.FileInputStream(pfd.fileDescriptor).channel.use { ch ->
+                val tail = java.nio.ByteBuffer.allocate(1000)
+                ch.position(200_000L)
+                while (tail.hasRemaining() && ch.read(tail) > 0) Unit
+                assertArrayEquals(photo.copyOfRange(200_000, 201_000), tail.array())
+                val head = java.nio.ByteBuffer.allocate(photo.size)
+                ch.position(0)
+                while (head.hasRemaining() && ch.read(head) > 0) Unit
+                assertArrayEquals(photo, head.array())
+            }
+        }
+
         // and in the background: a new photo, a sync through WorkManager
         insertPhoto("ci-$stamp-2.jpg", photo.reversedArray())
         g.scheduler.syncNow(pair.id)
