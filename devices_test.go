@@ -552,3 +552,38 @@ func TestDeviceKeysArePrivateAtRest(t *testing.T) {
 		t.Fatalf("device key: %s", hex.EncodeToString(key))
 	}
 }
+
+func TestDeviceLinkRoutes(t *testing.T) {
+	e := setup(t)
+	d := pairedDevice(t, e, "Jared's phone")
+	r := d.do("POST", "/api/device/link-token", nil, []byte(`{}`))
+	var out struct{ Token, Name, Pin string }
+	_ = json.Unmarshal(r.body, &out)
+	if r.status != 200 || !strings.HasPrefix(out.Token, "brw_") || out.Name != "Linked from Jared's phone" {
+		t.Fatalf("link token: %d %s", r.status, r.body)
+	}
+	// it works on the REST API as its user, and offers no MCP tools
+	if code, b := e.bearer(out.Token, "GET", "/api/ls?path=DOCS", nil); code != 200 || !strings.Contains(string(b), "notes.txt") {
+		t.Fatalf("token on the API: %d %s", code, b)
+	}
+	if code, b := e.bearer(out.Token, "POST", "/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}); code == 200 && strings.Contains(string(b), `"name"`) {
+		t.Fatalf("token offers MCP tools: %s", b)
+	}
+	var toks []map[string]any
+	_ = json.Unmarshal(e.do("GET", "/api/tokens", nil, 200), &toks)
+	if len(toks) != 1 {
+		t.Fatalf("token isn't listed for deleting: %v", toks)
+	}
+	// an admin's phone can list connections; someone else's can't add one
+	if r := d.do("GET", "/api/remotes", nil, nil); r.status != 200 {
+		t.Fatalf("admin phone, remotes: %d", r.status)
+	}
+	e.mkUser("kid", false, Grant{Path: "DOCS", Read: true})
+	k := pairedDevice(t, e.as("kid", "longenough-kid"), "Kid's phone")
+	if r := k.do("POST", "/api/remotes", map[string]string{"Content-Type": "application/json"}, []byte(`{"name":"X","kind":"smb","host":"127.0.0.1","share":"s"}`)); r.status != 403 {
+		t.Fatalf("non-admin phone added a connection: %d", r.status)
+	}
+	if r := k.do("POST", "/api/remotes/shares", nil, []byte(`{"host":"127.0.0.1"}`)); r.status != 403 {
+		t.Fatalf("non-admin phone probed SMB: %d", r.status)
+	}
+}

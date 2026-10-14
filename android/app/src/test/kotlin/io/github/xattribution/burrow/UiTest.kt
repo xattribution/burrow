@@ -6,6 +6,7 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
@@ -22,6 +23,7 @@ import io.github.xattribution.burrow.ui.files.DragDrop
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import kotlinx.coroutines.runBlocking
 import org.junit.BeforeClass
 import org.junit.Rule
 import org.junit.Test
@@ -147,7 +149,8 @@ class UiTest {
             assertEquals(body.size.toLong(), c.getLong(c.getColumnIndexOrThrow(android.provider.OpenableColumns.SIZE)))
         }
         // reading streams from Burrow: in order, then a jump back, then past the end
-        val r = RemoteFileProvider.Reader(ctx.graph.connection, f)
+        assertEquals("home", f.place)
+        val r = RemoteFileProvider.Reader(ctx.graph.places.fs(f.place), f)
         val buf = ByteArray(8)
         assertEquals(8, r.onRead(0, 8, buf)); assertEquals(String(body, 0, 8), String(buf))
         assertEquals(8, r.onRead(8, 8, buf)); assertEquals(String(body, 8, 8), String(buf))
@@ -160,6 +163,138 @@ class UiTest {
         assertTrue(!DragDrop.canMove("DOCS/Manuals", "DOCS/Manuals"))
         assertTrue(!DragDrop.canMove("DOCS/Manuals", "DOCS/Manuals/old"))
     }
+
+    /** Places added on the phone: another Burrow and (when a test SMB server runs) an SMB share. */
+    @Test
+    fun phoneOnlyConnections() {
+        pairAt(PHONE)
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val g = ctx.graph
+        TestServer(listOf("DOCS", "SHARED")).use { peer ->
+            File(peer.lib, "SHARED/Trip/beach.txt").apply { parentFile!!.mkdirs(); writeText("sand and sun") }
+            val alex = runBlocking { g.places.pairPeer(io.github.xattribution.burrow.core.PairingLink.parse(peer.pairingLink()), "Alex's Burrow", "Test phone") }
+            // its keys are its own, and this phone's Burrow never hears of it
+            assertTrue(alex.store.current!!.keys.deviceId.contentEquals(g.device.current!!.keys.deviceId).not())
+            assertTrue(!server.web("GET", "/api/remotes").contains("Alex"))
+
+            // browse it from the place switcher
+            switchPlace()
+            compose.onNodeWithText("Alex's Burrow").performClick()
+            waitFor("SHARED")
+            compose.onNodeWithText("SHARED").performClick()
+            waitFor("Trip")
+            shot("phone-place-peer")
+
+            // copy a folder from it to this phone's Burrow, through the phone
+            val trip = runBlocking { g.places.fs(alex.id).stat("SHARED/Trip") }
+            g.transfers.copy(alex.id, trip, io.github.xattribution.burrow.data.Place.HOME, "DOCS", move = false)
+            runBlocking { androidx.work.testing.TestListenableWorkerBuilder<io.github.xattribution.burrow.work.TransferWorker>(ctx).build().doWork() }
+            assertEquals("sand and sun", File(server.lib, "DOCS/Trip/beach.txt").readText())
+            assertTrue("a copy leaves the original", File(peer.lib, "SHARED/Trip/beach.txt").exists())
+
+            // a drag-out address for a file there reads from there
+            val beach = runBlocking { g.places.fs(alex.id).stat("SHARED/Trip/beach.txt") }
+            val f = RemoteFileProvider.parse(RemoteFileProvider.uriFor(ctx, beach, alex.id))!!
+            val buf = ByteArray(4)
+            RemoteFileProvider.Reader(g.places.fs(f.place), f).run { assertEquals(4, onRead(0, 4, buf)); onRelease() }
+            assertEquals("sand", String(buf))
+
+            // Link to my NAS: this phone's Burrow (the phone is its admin) now reaches Alex's itself
+            val msg = runBlocking { g.places.linkToHome(alex.id, homeIsAdmin = true) }
+            assertTrue(msg, msg.contains("library"))
+            assertTrue(server.web("GET", "/api/remotes").contains("Alex's Burrow"))
+            assertTrue(server.web("GET", "/api/ls?path=" + java.net.URLEncoder.encode("Alex's Burrow/SHARED/Trip", "UTF-8")).contains("beach.txt"))
+
+            smbPlace(ctx)
+
+            // removing it unpairs this phone from Alex's Burrow
+            runBlocking { g.places.remove(alex.id) }
+            assertTrue(g.places.get(alex.id) == null)
+            assertTrue(!peer.web("GET", "/api/devices").contains("Test phone"))
+        }
+    }
+
+    /** Unfolded: a second place beside the first, to drag between them. */
+    @Test
+    fun anotherPlaceBesideWhenUnfolded() {
+        pairAt(UNFOLDED)
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        TestServer(listOf("DOCS", "SHARED")).use { peer ->
+            File(peer.lib, "SHARED/Trip/beach.txt").apply { parentFile!!.mkdirs(); writeText("sand") }
+            runBlocking { ctx.graph.places.pairPeer(io.github.xattribution.burrow.core.PairingLink.parse(peer.pairingLink()), "Alex's Burrow", "Test phone") }
+            switchPlace()
+            compose.onAllNodesWithText("Burrow", useUnmergedTree = true).fetchSemanticsNodes().size.let { n -> compose.onAllNodesWithText("Burrow", useUnmergedTree = true)[n - 1].performClick() }
+            compose.onNodeWithContentDescription("More").performClick()
+            compose.onNodeWithText("Show another place beside").performClick()
+            waitFor("SHARED")
+            // this phone's Burrow on the left, Alex's on the right
+            assertTrue(compose.onAllNodesWithText("PHOTOS").fetchSemanticsNodes().isNotEmpty())
+            shot("unfolded-beside")
+        }
+    }
+
+    /** The same against a real Samba server, when ci/smb-server.sh is running (BURROW_TEST_SMB). */
+    private fun smbPlace(ctx: android.content.Context) {
+        val env = System.getenv("BURROW_TEST_SMB") ?: return
+        val (host, port, share, user, pass, dir) = env.split(":", limit = 6).let { Six(it[0], it[1].toInt(), it[2], it[3], it[4], it[5]) }
+        val sub = "app-${System.nanoTime()}"
+        File(dir, "$sub/Scans").mkdirs()
+        File(dir, "$sub/Scans/receipt.txt").writeText("paid in full")
+        File(dir, sub).walk().forEach { it.setWritable(true, false); it.setReadable(true, false) }
+        val g = ctx.graph
+        val bad = runCatching { runBlocking { g.places.addSmb("Bad", io.github.xattribution.burrow.data.SmbSettings(host, port, share, user, "wrong", folder = sub)) } }
+        assertTrue("wrong password: ${bad.exceptionOrNull()}", bad.exceptionOrNull()?.message.orEmpty().contains("turned down"))
+        val office = runBlocking { g.places.addSmb("Office", io.github.xattribution.burrow.data.SmbSettings(host, port, share, user, pass, folder = sub)) }
+        val fs = g.places.fs(office.id)
+        runBlocking {
+            assertEquals(listOf("Scans"), fs.ls("").entries.map { it.name })
+            fs.open("Scans/receipt.txt", from = 5).use { assertEquals("in full", it.source.readUtf8()) }
+            assertEquals("Scans/receipt (2).txt", fs.put("Scans", "receipt.txt", 3, 1_700_000_000_000, open = { okio.Buffer().writeUtf8("two") }))
+            fs.mkdir("Old")
+            assertEquals("Old/receipt.txt", fs.move("Scans/receipt.txt", "Old/receipt.txt"))
+            assertTrue("a move doesn't replace", runCatching { fs.move("Scans/receipt (2).txt", "Old/receipt.txt") }.isFailure)
+            fs.delete("Scans/receipt (2).txt")
+        }
+        assertEquals("paid in full", File(dir, "$sub/Old/receipt.txt").readText())
+        assertTrue(!File(dir, "$sub/Scans/receipt (2).txt").exists())
+
+        // move a file from this phone's Burrow onto the share
+        val notes = runBlocking { g.places.fs("home").stat("DOCS/notes.txt") }
+        g.transfers.copy("home", notes, office.id, "Scans", move = true)
+        runBlocking { androidx.work.testing.TestListenableWorkerBuilder<io.github.xattribution.burrow.work.TransferWorker>(ctx).build().doWork() }
+        assertEquals("hello notes", File(dir, "$sub/Scans/notes.txt").readText())
+        assertTrue("the move took the original to Burrow's trash", !File(server.lib, "DOCS/notes.txt").exists())
+        File(server.lib, "DOCS/notes.txt").writeText("hello notes") // other tests read it
+
+        // browse it in the app: back to the top of the place first, where the switcher is
+        compose.onAllNodesWithContentDescription("Alex's Burrow", useUnmergedTree = true)[0].performClick()
+        waitFor("SHARED")
+        switchPlace()
+        compose.onNodeWithText("Office").performClick()
+        waitFor("Old")
+        shot("phone-place-smb")
+        switchPlace()
+        compose.onNodeWithText("Burrow").performClick()
+
+        // link it to this phone's Burrow
+        runBlocking { g.places.linkToHome(office.id, homeIsAdmin = true) }
+        assertTrue(server.web("GET", "/api/ls?path=Office%2FOld").contains("receipt.txt"))
+    }
+
+    private fun switchPlace() {
+        compose.waitForIdle()
+        val n = compose.onAllNodesWithContentDescription("Switch place", useUnmergedTree = true).fetchSemanticsNodes()
+        if (n.isEmpty()) {
+            shot("fail-switch-place")
+            throw AssertionError("no place switcher; on screen: " + collect(compose.onRoot().fetchSemanticsNode()) + " / unmerged: " + collectDesc(compose.onRoot(useUnmergedTree = true).fetchSemanticsNode()))
+        }
+        compose.onAllNodesWithContentDescription("Switch place", useUnmergedTree = true)[0].performClick()
+    }
+
+    private fun collectDesc(n: androidx.compose.ui.semantics.SemanticsNode): List<String> =
+        n.config.getOrElseNullable(androidx.compose.ui.semantics.SemanticsProperties.ContentDescription) { null }.orEmpty() + n.children.flatMap { collectDesc(it) }
+
+    private data class Six(val a: String, val b: Int, val c: String, val d: String, val e: String, val f: String)
 
     @Test
     fun foldableCoverScreen() {

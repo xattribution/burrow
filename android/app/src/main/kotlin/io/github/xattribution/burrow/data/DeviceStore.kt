@@ -70,8 +70,9 @@ data class Paired(val keys: DeviceKeys, val info: ServerInfo, val preference: Ro
     val away get() = info.public.takeIf { it.isNotBlank() }
 }
 
-class DeviceStore(context: Context, private val wrapper: KeyWrapper) {
-    private val prefs = context.getSharedPreferences("device", Context.MODE_PRIVATE)
+/** One pairing, kept in its own preferences file: "device" for this phone's Burrow, "peer-<id>" for others. */
+class DeviceStore(context: Context, private val wrapper: KeyWrapper, file: String = "device") {
+    private val prefs = context.getSharedPreferences(file, Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
     private val _state = MutableStateFlow(load())
     val state: StateFlow<Paired?> = _state

@@ -256,6 +256,10 @@ func (a *App) deviceRoutes() http.Handler {
 		{"GET /api/device/me", a.apiDeviceMe},
 		{"PATCH /api/device/me", a.apiDeviceUpdate},
 		{"DELETE /api/device/me", a.apiDeviceUnpair},
+		{"POST /api/device/link-token", a.apiDeviceLinkToken},
+		{"GET /api/remotes", deviceAdmin(a.apiRemotes)},
+		{"POST /api/remotes", deviceAdmin(a.apiAddRemote)},
+		{"POST /api/remotes/shares", deviceAdmin(a.apiRemoteShares)},
 	} {
 		m.HandleFunc(r.pattern, r.h)
 	}

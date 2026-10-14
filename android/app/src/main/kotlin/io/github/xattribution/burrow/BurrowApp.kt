@@ -14,7 +14,7 @@ open class BurrowApp : Application(), SingletonImageLoader.Factory {
 
     override fun onCreate() {
         super.onCreate()
-        graph = AppGraph(this, keyWrapper())
+        graph = AppGraph(this, ::keyWrapper)
         graph.notifications.createChannels()
         graph.scheduler.reschedule()
         Thread { tidyCache() }.start()
@@ -27,8 +27,8 @@ open class BurrowApp : Application(), SingletonImageLoader.Factory {
         cacheDir.resolve("outbox").listFiles()?.filter { now - it.lastModified() > 7 * 86_400_000L }?.forEach { it.deleteRecursively() }
     }
 
-    /** Where the device key is sealed: the Android Keystore (tests swap it out). */
-    open fun keyWrapper(): KeyWrapper = KeystoreWrapper()
+    /** Where keys and passwords are sealed: the Android Keystore (tests swap it out). */
+    open fun keyWrapper(alias: String = "burrow-device-key"): KeyWrapper = KeystoreWrapper(alias)
 
     override fun newImageLoader(context: PlatformContext): ImageLoader = graph.imageLoader()
 }

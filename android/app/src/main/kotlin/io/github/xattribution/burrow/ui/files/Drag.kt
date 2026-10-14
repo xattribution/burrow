@@ -29,8 +29,16 @@ class DragDrop(
     private val ctx: Context,
     private val scope: CoroutineScope,
     private val vm: FilesViewModel,
+    /** The place this list shows: drops from another place are copied, not moved. */
+    val place: String,
     private val onLift: () -> Unit,
 ) {
+    /** What a drag inside the app carries, so the list it lands on knows where it came from. */
+    data class Dragged(val place: String, val entry: Entry)
+
+    val isBurrow = vm.fs.isBurrow
+    private val rootWritable = !isBurrow // an SMB share's top is a folder; a Burrow's is the list of libraries
+
     /** The folder under the drag, which lights up, and what dropping there does. */
     var over by mutableStateOf<String?>(null)
         private set
@@ -45,10 +53,10 @@ class DragDrop(
         onLift()
         if (e.dir) {
             // folders only move inside Burrow, so the drag stays in this app
-            return DragAndDropTransferData(ClipData.newPlainText(e.name, e.name), localState = e, flags = 0)
+            return DragAndDropTransferData(ClipData.newPlainText(e.name, e.name), localState = Dragged(place, e), flags = 0)
         }
-        val clip = ClipData(e.name, arrayOf(RemoteFileProvider.mimeOf(e.name)), ClipData.Item(RemoteFileProvider.uriFor(ctx, e)))
-        return DragAndDropTransferData(clip, localState = e, flags = View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ)
+        val clip = ClipData(e.name, arrayOf(RemoteFileProvider.mimeOf(e.name)), ClipData.Item(RemoteFileProvider.uriFor(ctx, e, place)))
+        return DragAndDropTransferData(clip, localState = Dragged(place, e), flags = View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ)
     }
 
     /** A drop target for [dir]; with [enabled] false it only notices the drag end. */
@@ -56,9 +64,14 @@ class DragDrop(
         override fun onEntered(event: DragAndDropEvent) {
             if (!enabled) return
             val m = moving(event)
-            if (m != null && !canMove(m.path, dir)) return
+            if (m != null && m.place == place && !canMove(m.entry.path, dir, rootWritable)) return
             over = dir
-            hint = (if (m != null) "Move to " else "Upload to ") + dir.substringAfterLast('/')
+            val verb = when {
+                m == null -> "Upload to "
+                m.place == place -> "Move to "
+                else -> "Copy to "
+            }
+            hint = verb + dir.substringAfterLast('/').ifEmpty { ctx.graph.places.get(place)?.name ?: "Burrow" }
         }
 
         override fun onExited(event: DragAndDropEvent) {
@@ -81,13 +94,21 @@ class DragDrop(
         hint = null
     }
 
-    private fun moving(event: DragAndDropEvent) = event.toAndroidDragEvent().localState as? Entry
+    private fun moving(event: DragAndDropEvent) = event.toAndroidDragEvent().localState as? Dragged
 
     private fun drop(event: DragAndDropEvent, dir: String): Boolean {
         val m = moving(event)
         if (m != null) {
-            if (!canMove(m.path, dir)) return false
-            vm.act(done = "Moved ${m.name} to ${dir.substringAfterLast('/')}") { it.move(m.path, "$dir/${m.name}") }
+            val e = m.entry
+            val where = dir.substringAfterLast('/').ifEmpty { ctx.graph.places.get(place)?.name ?: "Burrow" }
+            if (m.place != place) {
+                // between places: a copy through the phone, the original stays
+                ctx.graph.transfers.copy(m.place, e, place, dir, move = false)
+                vm.message.value = "Copying ${e.name} to $where"
+                return true
+            }
+            if (!canMove(e.path, dir, rootWritable)) return false
+            vm.act(done = "Moved ${e.name} to $where") { it.move(e.path, if (dir.isEmpty()) e.name else "$dir/${e.name}") }
             return true
         }
         val de = event.toAndroidDragEvent()
@@ -98,7 +119,7 @@ class DragDrop(
         // copied off the main thread, while the grant from the other app still holds
         scope.launch(Dispatchers.IO) {
             try {
-                uris.forEach { u -> runCatching { ctx.graph.transfers.upload(stageForUpload(ctx, u), dir) } }
+                uris.forEach { u -> runCatching { ctx.graph.transfers.upload(stageForUpload(ctx, u), dir, place = place) } }
             } finally {
                 perms?.release()
             }
@@ -109,7 +130,7 @@ class DragDrop(
 
     companion object {
         /** Not into the folder it's already in, onto itself, or into its own subfolder. */
-        fun canMove(src: String, dest: String) =
-            dest != src.substringBeforeLast('/', "") && dest != src && !dest.startsWith("$src/") && dest.isNotEmpty()
+        fun canMove(src: String, dest: String, rootWritable: Boolean = false) =
+            dest != src.substringBeforeLast('/', "") && dest != src && !dest.startsWith("$src/") && (dest.isNotEmpty() || rootWritable)
     }
 }

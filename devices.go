@@ -792,3 +792,39 @@ func (a *App) apiDeviceUnpair(w http.ResponseWriter, r *http.Request) {
 	a.dropDeviceSessions(id, 0)
 	writeJSON(w, map[string]bool{"ok": true})
 }
+
+// apiDeviceLinkToken makes an API token for linking this Burrow to another one
+// from a paired phone (the phone's "Link to my NAS"). It reaches what the user
+// does, over the REST API only (no MCP tools), and is listed under the user's
+// tokens, so it can be deleted there like any other. It returns the certificate
+// fingerprint too, for a link made straight to this Burrow's own address.
+func (a *App) apiDeviceLinkToken(w http.ResponseWriter, r *http.Request) {
+	ai := authOf(r)
+	var dev string
+	_ = a.st.db.QueryRow(`SELECT name FROM devices WHERE id=?`, ai.deviceID).Scan(&dev)
+	sc := TokenScope{Tools: map[string]string{}, Folders: []string{}, API: true, Access: []string{groupRead, groupEdit}}
+	b, _ := json.Marshal(sc)
+	tok := "brw_" + randToken(24)
+	name := trunc("Linked from "+strings.TrimSpace(dev), 80)
+	if _, err := a.st.exec(`INSERT INTO tokens(name,hash,created,user_id,scope) VALUES(?,?,?,?,?)`, name, sha(tok), now(), ai.user.ID, string(b)); err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	pin := ""
+	if a.certs != nil {
+		c, _ := a.certs.get(nil)
+		pin = certFingerprint(c)
+	}
+	writeJSON(w, map[string]any{"token": tok, "name": name, "pin": pin})
+}
+
+// deviceAdmin lets a paired phone of an admin do one admin thing.
+func deviceAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !userOf(r).Admin {
+			httpErr(w, http.StatusForbidden, "only an admin can do this")
+			return
+		}
+		next(w, r)
+	}
+}

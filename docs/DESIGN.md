@@ -487,6 +487,17 @@ The QR code carries the home address (`lan_url`, or the address the browser used
 - Not yet: indexing (search), share links, zip downloads and phone sync pairs on a connected NAS.
 - Tests: `remote_test.go` runs the same checks against a real Samba server (`ci/smb-server.sh`, started in CI) and against a second Burrow over TLS with a pinned certificate: listing, range reads, thumbnails, refused paths, mkdir with parents, uploads with every conflict mode, renames that won't replace, moves both ways between libraries as jobs, trash, restore and purge, grants (no access, read-only), refused links, the wrong password, pin or token, and no plaintext secret in the database.
 
+## 16b. Connections on the phone (`android/.../data/Places.kt`, `PlaceFs.kt`)
+
+- A connection lives where it was added. Added in the app, it stays on the phone, so a folder someone else shares with you never reaches your own NAS. **Link to my NAS** hands one over on purpose (`POST /api/remotes`, admins only, through the device channel).
+- Another Burrow is a second pairing with its own device keys, in its own preferences file (`peer-<id>`) sealed under its own Keystore alias, and its own `Connection`. Removing it unpairs the phone there.
+- An SMB share uses smbj (SMB2/3, NTLM through Bouncy Castle). Its sign-in is sealed with the Keystore; listings skip hidden and system entries; reads are at an offset, so players can seek; writes create the file exclusively and pick "name (2).ext" on a clash; renames never replace. A share has no trash the app can show, so a delete there is permanent and the dialog says so.
+- Everything that browses goes through `PlaceFs`: the folder list, previews, thumbnails (made on the phone for SMB), Media3 playback, "Open with" (now the streaming content address instead of a download first) and drag-out addresses (`content://…remote/<place>/<size>/<path>`).
+- Copies between places run in `TransferWorker` (`copy` and `move` rows; the place is carried in the existing columns, so old queues read as before). Folders copy whole and merge into a folder of the same name. A move deletes the original only after everything is written.
+- `POST /api/device/link-token` makes a token whose scope gives the REST API read and edit (`TokenScope.Access`) without any MCP tool; only Burrow sets that field. A link to another Burrow tries its public address, then its home one, each first without the certificate pin (a reverse proxy has a public certificate) and then with it.
+- From tethersys: the handshake on a new network races the addresses (preferred first, the next 300 ms later), and anything that answers but isn't Burrow no longer ends the search. On someone else's Wi-Fi the app no longer waits out a connect timeout on the home address before trying the public one.
+- Tests: Robolectric against two real Burrows and a real Samba server: pairing a second Burrow on separate keys, browsing it from the switcher, copying a folder home through the worker, its drag-out address, linking it so the home Burrow lists it, the SMB share (wrong password, ranged read, rename on clash, no-replace move, delete, a move from home onto it) and linking that too, and two places side by side unfolded. The shared tests check the address race against a silent port and a web server that isn't Burrow.
+
 ## 17. Roadmap
 
 1. The iPhone app on the shared core (iOS targets with CryptoKit and URLSession).

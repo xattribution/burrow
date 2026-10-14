@@ -10,6 +10,7 @@ import io.github.xattribution.burrow.core.db.BurrowDb
 import io.github.xattribution.burrow.data.Connection
 import io.github.xattribution.burrow.data.DeviceStore
 import io.github.xattribution.burrow.data.KeyWrapper
+import io.github.xattribution.burrow.data.Places
 import io.github.xattribution.burrow.media.FileImageFetcher
 import io.github.xattribution.burrow.media.ThumbFetcher
 import io.github.xattribution.burrow.work.Notifications
@@ -18,19 +19,20 @@ import io.github.xattribution.burrow.work.Transfers
 import okio.Path.Companion.toOkioPath
 
 /** The app's long-lived pieces, made once per process. */
-class AppGraph(val app: Application, keyWrapper: KeyWrapper) {
+class AppGraph(val app: Application, keyWrapper: (String) -> KeyWrapper) {
     val db: BurrowDb by lazy { BurrowDb(AndroidSqliteDriver(BurrowDb.Schema, app, "burrow.db")) }
-    val device = DeviceStore(app, keyWrapper)
+    val device = DeviceStore(app, keyWrapper("burrow-device-key"))
     val connection = Connection(app, device)
+    val places = Places(app, connection, keyWrapper)
     val notifications = Notifications(app)
     val scheduler = SyncScheduler(app) { db }
     val transfers = Transfers(app) { db }
 
     fun imageLoader(): ImageLoader = ImageLoader.Builder(app)
         .components {
-            add(ThumbFetcher.Factory(connection), ThumbFetcher.Thumb::class)
+            add(ThumbFetcher.Factory(places), ThumbFetcher.Thumb::class)
             add(ThumbFetcher.ThumbKeyer())
-            add(FileImageFetcher.Factory(connection), FileImageFetcher.Image::class)
+            add(FileImageFetcher.Factory(places), FileImageFetcher.Image::class)
             add(FileImageFetcher.ImageKeyer())
         }
         .memoryCache { MemoryCache.Builder().maxSizePercent(app, 0.2).build() }

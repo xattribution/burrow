@@ -16,7 +16,6 @@ import android.system.ErrnoException
 import android.system.OsConstants
 import android.webkit.MimeTypeMap
 import io.github.xattribution.burrow.core.Entry
-import io.github.xattribution.burrow.core.Response
 import io.github.xattribution.burrow.graph
 import kotlinx.coroutines.runBlocking
 import java.io.FileNotFoundException
@@ -48,14 +47,14 @@ class RemoteFileProvider : ContentProvider() {
         val f = parse(uri) ?: throw FileNotFoundException(uri.toString())
         val ctx = context ?: throw FileNotFoundException(uri.toString())
         val sm = ctx.getSystemService(StorageManager::class.java)
-        return sm.openProxyFileDescriptor(ParcelFileDescriptor.MODE_READ_ONLY, Reader(ctx.graph.connection, f), io)
+        return sm.openProxyFileDescriptor(ParcelFileDescriptor.MODE_READ_ONLY, Reader(ctx.graph.places.fs(f.place), f), io)
     }
 
     override fun insert(uri: Uri, values: ContentValues?): Uri? = throw UnsupportedOperationException()
     override fun delete(uri: Uri, selection: String?, args: Array<out String>?): Int = throw UnsupportedOperationException()
     override fun update(uri: Uri, values: ContentValues?, selection: String?, args: Array<out String>?): Int = throw UnsupportedOperationException()
 
-    internal data class Remote(val path: String, val size: Long) {
+    internal data class Remote(val place: String, val path: String, val size: Long) {
         val name get() = path.substringAfterLast('/')
     }
 
@@ -63,8 +62,8 @@ class RemoteFileProvider : ContentProvider() {
      * Reads ahead on one open stream while the other app reads in order, and
      * reopens at the new offset when it jumps.
      */
-    internal class Reader(private val conn: Connection, private val f: Remote) : ProxyFileDescriptorCallback() {
-        private var open: Response? = null
+    internal class Reader(private val fs: PlaceFs, private val f: Remote) : ProxyFileDescriptorCallback() {
+        private var open: Opened? = null
         private var pos = -1L
 
         override fun onGetSize() = f.size
@@ -74,13 +73,10 @@ class RemoteFileProvider : ContentProvider() {
             try {
                 if (open == null || offset != pos) {
                     open?.close()
-                    val r = runBlocking { conn.use { it.raw(f.path, from = offset) } }
-                    open = r
-                    // a server that ignored the range sent the whole file
-                    if (offset > 0 && r.status != 206) r.body.skip(offset)
+                    open = runBlocking { fs.open(f.path, from = offset) }
                     pos = offset
                 }
-                val src = open!!.body
+                val src = open!!.source
                 var n = 0
                 while (n < size) {
                     val got = src.read(data, n, size - n)
@@ -106,16 +102,16 @@ class RemoteFileProvider : ContentProvider() {
         fun authority(ctx: Context) = ctx.packageName + ".remote"
 
         /** The address another app reads [e] at. */
-        fun uriFor(ctx: Context, e: Entry): Uri = Uri.Builder().scheme("content").authority(authority(ctx))
-            .appendPath(e.size.toString()).appendPath(e.path).build()
+        fun uriFor(ctx: Context, e: Entry, place: String = Place.HOME): Uri = Uri.Builder().scheme("content").authority(authority(ctx))
+            .appendPath(place).appendPath(e.size.toString()).appendPath(e.path).build()
 
         internal fun parse(uri: Uri): Remote? {
             val segs = uri.pathSegments
-            if (segs.size != 2) return null
-            val size = segs[0].toLongOrNull() ?: return null
-            val path = segs[1]
-            if (path.isEmpty() || size < 0) return null
-            return Remote(path, size)
+            if (segs.size != 3) return null
+            val size = segs[1].toLongOrNull() ?: return null
+            val path = segs[2]
+            if (segs[0].isEmpty() || path.isEmpty() || size < 0) return null
+            return Remote(segs[0], path, size)
         }
 
         fun mimeOf(name: String): String =

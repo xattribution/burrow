@@ -57,6 +57,9 @@ import io.github.xattribution.burrow.core.TrashItem
 import io.github.xattribution.burrow.data.Link
 import io.github.xattribution.burrow.data.RoutePreference
 import io.github.xattribution.burrow.graph
+import io.github.xattribution.burrow.data.Place
+import io.github.xattribution.burrow.work.unplace
+import androidx.compose.material.icons.outlined.Lan
 import io.github.xattribution.burrow.ui.common.Load
 import io.github.xattribution.burrow.ui.common.formatSize
 import io.github.xattribution.burrow.ui.common.formatWhen
@@ -76,7 +79,10 @@ fun SettingsScreen(pairLink: String?, onLinkUsed: () -> Unit) {
     var unpairing by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    var addingPlace by remember { mutableStateOf(false) }
+    val places by g.places.list.collectAsState()
     val p = paired ?: return
+    if (addingPlace) AddConnectionDialog(onDismiss = { addingPlace = false }, onAdded = { pl -> addingPlace = false; message = "Connected to ${pl.name}. Pick it at the top of Files." })
 
     LaunchedEffect(trashTick) {
         trash = try {
@@ -86,7 +92,9 @@ fun SettingsScreen(pairLink: String?, onLinkUsed: () -> Unit) {
             Load.Failed(friendly(e))
         }
     }
-    Scaffold(topBar = { TopAppBar(title = { Text("Settings") }) }) { pad ->
+    val snack = remember { androidx.compose.material3.SnackbarHostState() }
+    LaunchedEffect(message) { message?.let { snack.showSnackbar(it) } }
+    Scaffold(topBar = { TopAppBar(title = { Text("Settings") }) }, snackbarHost = { androidx.compose.material3.SnackbarHost(snack) }) { pad ->
         Box(Modifier.padding(pad).fillMaxSize(), contentAlignment = Alignment.TopCenter) {
             LazyColumn(Modifier.widthIn(max = 720.dp).fillMaxWidth()) {
                 item {
@@ -136,7 +144,21 @@ fun SettingsScreen(pairLink: String?, onLinkUsed: () -> Unit) {
                         trailingContent = { TextButton(onClick = { renaming = true }) { Text("Rename") } },
                     )
                 }
+                item { HorizontalDivider() }
+                item {
+                    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Lan, null)
+                        Text("Connections", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(start = 12.dp).weight(1f))
+                        TextButton(onClick = { addingPlace = true }) { Text("Add") }
+                    }
+                }
+                val others = places.filter { it.id != Place.HOME }
+                if (others.isEmpty()) item {
+                    Text("Other Burrows and SMB shares you add stay on this phone.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                }
+                items(others, key = { "p${it.id}" }) { pl -> ConnectionRow(pl, homeIsAdmin = p.info.admin) { message = it } }
                 if (transfers.isNotEmpty()) {
+                    item { HorizontalDivider() }
                     item {
                         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Outlined.SwapVert, null)
@@ -149,12 +171,23 @@ fun SettingsScreen(pairLink: String?, onLinkUsed: () -> Unit) {
                             headlineContent = { Text(t.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             supportingContent = {
                                 Column {
-                                    val where = if (t.direction == "up") "to ${t.remote_dir}" else "to Downloads/Burrow"
+                                    val (dst, dir) = unplace(t.remote_dir)
+                                    val placeName = g.places.get(dst)?.name ?: "Burrow"
+                                    val where = when (t.direction) {
+                                        "down" -> "to Downloads/Burrow"
+                                        else -> "to $placeName" + if (dir.isNotEmpty()) "/$dir" else ""
+                                    }
+                                    val (doing, did) = when (t.direction) {
+                                        "up" -> "Sending" to "Sent"
+                                        "copy" -> "Copying" to "Copied"
+                                        "move" -> "Moving" to "Moved"
+                                        else -> "Saving" to "Saved"
+                                    }
                                     Text(when (t.state) {
-                                        "done" -> if (t.direction == "up") "Sent $where" else "Saved $where"
+                                        "done" -> "$did $where"
                                         "failed" -> "Failed: ${t.result}"
                                         "cancelled" -> "Cancelled"
-                                        else -> "${if (t.direction == "up") "Sending" else "Saving"} $where" + if (t.size > 0) ", ${formatSize(t.done_bytes)} of ${formatSize(t.size)}" else ""
+                                        else -> "$doing $where" + if (t.size > 0) ", ${formatSize(t.done_bytes)} of ${formatSize(t.size)}" else ""
                                     }, maxLines = 2)
                                     if (t.state == "running" || t.state == "queued") LinearProgressIndicator(progress = { if (t.size > 0) t.done_bytes.toFloat() / t.size else 0f }, modifier = Modifier.fillMaxWidth().padding(top = 4.dp))
                                 }

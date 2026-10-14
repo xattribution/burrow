@@ -91,6 +91,34 @@ class ChannelInteropTest {
     }
 
     @Test
+    fun handshakeRacesAddressesOnANewNetwork() = runBlocking {
+        val (res, _) = pair()
+        // the home address on a stranger's network: something that takes the
+        // connection and never answers, and a web server that isn't Burrow
+        val silent = java.net.ServerSocket(0)
+        val held = mutableListOf<java.net.Socket>()
+        Thread { runCatching { while (true) held += silent.accept() } }.apply { isDaemon = true }.start()
+        val notBurrow = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0).apply {
+            createContext("/") { it.sendResponseHeaders(404, -1); it.close() }
+            start()
+        }
+        try {
+            val routes = StaticRoutes(listOf("https://127.0.0.1:${silent.localPort}", "http://127.0.0.1:${notBurrow.address.port}", server.lan))
+            val api = api(res.keys, res.server.pins.toSet(), routes)
+            val t0 = System.nanoTime()
+            assertTrue(api.ls("DOCS").entries.isNotEmpty())
+            val ms = (System.nanoTime() - t0) / 1_000_000
+            // two staggers, not a connect or read timeout
+            assertTrue(ms < 3_000, "took $ms ms")
+            assertEquals(server.lan, api.channel.activeBase)
+        } finally {
+            notBurrow.stop(0)
+            held.forEach { it.close() }
+            silent.close()
+        }
+    }
+
+    @Test
     fun sessionSurvivesServerRestart() = runBlocking {
         val (res, _) = pair()
         val api = api(res.keys, res.server.pins.toSet())

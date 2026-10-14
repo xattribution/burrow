@@ -19,7 +19,13 @@ import io.github.xattribution.burrow.core.ApiException
 import io.github.xattribution.burrow.core.NotPairedException
 import io.github.xattribution.burrow.core.Uploader
 import io.github.xattribution.burrow.core.db.BurrowDb
+import io.github.xattribution.burrow.core.Entry
+import io.github.xattribution.burrow.data.Place
+import io.github.xattribution.burrow.data.PlaceFs
 import io.github.xattribution.burrow.graph
+import kotlinx.coroutines.runBlocking
+import okio.ForwardingSource
+import okio.Source
 import kotlinx.coroutines.flow.MutableStateFlow
 import okio.buffer
 import okio.sink
@@ -32,7 +38,8 @@ class Transfers(private val context: Context, private val db: () -> BurrowDb) {
     /** Bumped whenever the queue changes, so screens can refresh. */
     val changed = MutableStateFlow(0L)
 
-    fun upload(uri: Uri, remoteDir: String, name: String? = null) {
+    fun upload(uri: Uri, dir: String, name: String? = null, place: String = Place.HOME) {
+        val remoteDir = placed(place, dir)
         val cr = context.contentResolver
         var size = -1L
         var display = name
@@ -57,9 +64,19 @@ class Transfers(private val context: Context, private val db: () -> BurrowDb) {
         kick()
     }
 
-    fun download(remotePath: String, size: Long) {
+    fun download(remotePath: String, size: Long, place: String = Place.HOME) {
         val now = System.currentTimeMillis() / 1000
-        db().transferQueries.queue("down", "", remotePath.substringBeforeLast('/', ""), remotePath.substringAfterLast('/'), size, 0, now, now)
+        db().transferQueries.queue("down", "", placed(place, remotePath.substringBeforeLast('/', "")), remotePath.substringAfterLast('/'), size, 0, now, now)
+        kick()
+    }
+
+    /**
+     * Copies (or moves) a file or folder from one place to another through the
+     * phone: read from one, written to the other, the original deleted last.
+     */
+    fun copy(from: String, e: Entry, to: String, dir: String, move: Boolean) {
+        val now = System.currentTimeMillis() / 1000
+        db().transferQueries.queue(if (move) "move" else "copy", placed(from, e.path), placed(to, dir), e.name, if (e.dir) -1 else e.size, e.mtime * 1000, now, now)
         kick()
     }
 
@@ -87,7 +104,23 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
             val t = q.next().executeAsOneOrNull() ?: break
             val now = { System.currentTimeMillis() / 1000 }
             try {
-                if (t.direction == "up") {
+                val (place, dir) = unplace(t.remote_dir)
+                if (t.direction == "copy" || t.direction == "move") {
+                    copyAcross(t.id, t.name, t.local_uri, t.remote_dir, t.direction == "move")
+                    q.finish("done", "${g.places.get(place)?.name ?: "Burrow"}/" + listOf(dir, t.name).filter { it.isNotEmpty() }.joinToString("/"), t.done_bytes, now(), t.id)
+                } else if (t.direction == "up" && place != Place.HOME) {
+                    val uri = Uri.parse(t.local_uri)
+                    var size = t.size
+                    if (size < 0) size = applicationContext.contentResolver.openInputStream(uri)?.use { it.skip(Long.MAX_VALUE) } ?: throw FileNotFoundException(t.name)
+                    runCatching { setForeground(info("Sending ${t.name}", g.places.get(place)?.name.orEmpty(), 0, size)) }
+                    val open = { if (uri.scheme == "file") File(uri.path!!).source() else (applicationContext.contentResolver.openInputStream(uri) ?: throw FileNotFoundException(t.name)).source() }
+                    val path = g.places.fs(place).put(dir, t.name, size, t.mtime, open) { sent ->
+                        q.progress(sent, "", now(), t.id)
+                        g.transfers.changed.value++
+                    }
+                    q.finish("done", path, size, now(), t.id)
+                    if (uri.scheme == "file" && uri.path?.startsWith(applicationContext.cacheDir.path) == true) File(uri.path!!).parentFile?.deleteRecursively()
+                } else if (t.direction == "up") {
                     val uri = Uri.parse(t.local_uri)
                     var size = t.size
                     if (size < 0) size = applicationContext.contentResolver.openInputStream(uri)?.use { it.skip(Long.MAX_VALUE) } ?: throw FileNotFoundException(t.name)
@@ -111,11 +144,11 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     if (uri.scheme == "file" && uri.path?.startsWith(applicationContext.cacheDir.path) == true) File(uri.path!!).parentFile?.deleteRecursively()
                 } else {
                     runCatching { setForeground(info("Saving ${t.name}", "to Downloads/Burrow", 0, t.size)) }
-                    val saved = g.connection.use { saveToDownloads(it, t.remote_dir, t.name, t.size) { got ->
+                    val saved = saveToDownloads(g.places.fs(place), dir, t.name, t.size) { got ->
                         q.progress(got, "", now(), t.id)
                         g.transfers.changed.value++
                         setForegroundAsync(info("Saving ${t.name}", "to Downloads/Burrow", got, t.size))
-                    } }
+                    }
                     q.finish("done", saved, t.size, now(), t.id)
                 }
             } catch (e: NotPairedException) {
@@ -139,8 +172,51 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
         return Result.success()
     }
 
+    /** Reads from one place and writes into another; folders are copied whole. */
+    private suspend fun copyAcross(id: Long, name: String, from: String, to: String, move: Boolean) {
+        val (sp, spath) = unplace(from)
+        val (dp, ddir) = unplace(to)
+        val src = g.places.fs(sp)
+        val dst = g.places.fs(dp)
+        val q = g.db.transferQueries
+        val label = "${if (move) "Moving" else "Copying"} $name"
+        val where = "to ${g.places.get(dp)?.name ?: "Burrow"}"
+        var done = 0L
+        suspend fun copy(e: Entry, into: String) {
+            if (e.dir) {
+                val target = if (into.isEmpty()) e.name else "$into/${e.name}"
+                try {
+                    dst.mkdir(target)
+                } catch (x: Exception) {
+                    // already there: the copy merges into it
+                    if (runCatching { dst.stat(target).dir }.getOrDefault(false).not()) throw x
+                }
+                for (c in src.ls(e.path).entries) copy(c, target)
+                return
+            }
+            runCatching { setForeground(info(label, where, done, done + e.size)) }
+            dst.put(into, e.name, e.size, e.mtime * 1000, open = { openSource(src, e.path) }) { n ->
+                q.progress(done + n, "", System.currentTimeMillis() / 1000, id)
+                g.transfers.changed.value++
+            }
+            done += e.size
+        }
+        copy(src.stat(spath).copy(path = spath), ddir)
+        if (move) src.delete(spath)
+    }
+
+    private fun openSource(fs: PlaceFs, path: String): Source {
+        val o = runBlocking { fs.open(path) }
+        return object : ForwardingSource(o.source) {
+            override fun close() {
+                super.close()
+                o.close()
+            }
+        }
+    }
+
     /** Streams a file into Downloads/Burrow through the media store. */
-    private suspend fun saveToDownloads(api: io.github.xattribution.burrow.core.BurrowApi, dir: String, name: String, size: Long, progress: (Long) -> Unit): String {
+    private suspend fun saveToDownloads(fs: PlaceFs, dir: String, name: String, size: Long, progress: (Long) -> Unit): String {
         val cr = applicationContext.contentResolver
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
@@ -149,12 +225,12 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
         }
         val uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: throw FileNotFoundException("Downloads isn't available")
         try {
-            api.raw(if (dir.isEmpty()) name else "$dir/$name").use { r ->
+            fs.open(if (dir.isEmpty()) name else "$dir/$name").use { r ->
                 (cr.openOutputStream(uri, "wt") ?: throw FileNotFoundException(name)).sink().buffer().use { out ->
                     var got = 0L
                     val buf = okio.Buffer()
                     while (true) {
-                        val n = r.body.read(buf, 256 * 1024)
+                        val n = r.source.read(buf, 256 * 1024)
                         if (n < 0) break
                         out.write(buf, n)
                         got += n
@@ -169,4 +245,12 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
             throw e
         }
     }
+}
+
+/** A folder in a place, as one queue column: this phone's Burrow stays a plain path. */
+internal fun placed(place: String, path: String) = if (place == Place.HOME) path else "$place\u0000$path"
+
+internal fun unplace(s: String): Pair<String, String> {
+    val i = s.indexOf('\u0000')
+    return if (i < 0) Place.HOME to s else s.substring(0, i) to s.substring(i + 1)
 }
