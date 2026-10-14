@@ -105,6 +105,17 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
 import io.github.xattribution.burrow.core.Entry
+import io.github.xattribution.burrow.data.Place
+import io.github.xattribution.burrow.ui.common.friendly
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Lan
+import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material.icons.outlined.VerticalSplit
 import io.github.xattribution.burrow.graph
 import io.github.xattribution.burrow.media.ThumbFetcher
 import io.github.xattribution.burrow.ui.common.Busy
@@ -114,42 +125,64 @@ import io.github.xattribution.burrow.ui.common.formatSize
 import io.github.xattribution.burrow.ui.common.kindIcon
 import kotlinx.coroutines.launch
 
+/** Detail keys: "<place>\u0002<path>" for a file, "\u0001<place>" for a second place shown beside. */
+private const val FILE_SEP = '\u0002'
+private const val BESIDE = "\u0001"
+
 /**
- * Browse and search Burrow. On a phone (or a folded foldable) the folder and a
- * file's details take turns on screen; with room for two panes (unfolded, a
- * tablet, landscape) they sit side by side, clear of the hinge.
+ * Browse and search Burrow, or another place this phone connects to. On a
+ * phone (or a folded foldable) the folder and a file's details take turns on
+ * screen; with room for two panes (unfolded, a tablet, landscape) they sit side
+ * by side, clear of the hinge, and the second pane can show another place to
+ * drag files between the two.
  */
 @Composable
 fun FilesScreen() {
-    val conn = LocalContext.current.graph.connection
-    val vm: FilesViewModel = viewModel { FilesViewModel(conn) }
+    val g = LocalContext.current.graph
+    val places by g.places.list.collectAsState()
+    var placeId by rememberSaveable { mutableStateOf(Place.HOME) }
+    if (places.none { it.id == placeId }) placeId = Place.HOME
+    val vm: FilesViewModel = viewModel(key = "files:$placeId") { FilesViewModel(g.places.fs(placeId)) }
     val navigator = rememberListDetailPaneScaffoldNavigator<String>()
     val scope = rememberCoroutineScope()
     val twoPane = navigator.scaffoldValue[ListDetailPaneScaffoldRole.List] == PaneAdaptedValue.Expanded &&
         navigator.scaffoldValue[ListDetailPaneScaffoldRole.Detail] == PaneAdaptedValue.Expanded
-    val selected = navigator.currentDestination?.contentKey
+    val canBeside = navigator.scaffoldDirective.maxHorizontalPartitions > 1 && places.size > 1
+    val key = navigator.currentDestination?.contentKey
+    val selected = key?.takeIf { twoPane && it.substringBefore(FILE_SEP) == placeId }?.substringAfter(FILE_SEP)
     NavigableListDetailPaneScaffold(
         navigator = navigator,
         listPane = {
             AnimatedPane {
-                FolderPane(vm, selected = if (twoPane) selected else null) { e ->
-                    if (e.dir) vm.open(e.path) else scope.launch { navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, e.path) }
+                FolderPane(
+                    vm, placeId, places, selected = selected,
+                    onPlace = {
+                        placeId = it
+                        // a file from the old place shouldn't stay open beside the new one
+                        if (navigator.currentDestination?.contentKey?.startsWith(BESIDE) == false) scope.launch { navigator.navigateBack() }
+                    },
+                    onBeside = if (canBeside) ({ scope.launch { navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, BESIDE + (places.firstOrNull { it.id != placeId }?.id ?: Place.HOME)) } }) else null,
+                ) { e ->
+                    if (e.dir) vm.open(e.path) else scope.launch { navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, "$placeId$FILE_SEP${e.path}") }
                 }
             }
         },
         detailPane = {
             AnimatedPane {
                 val p = navigator.currentDestination?.contentKey
-                if (p == null) {
-                    EmptyState(Icons.Outlined.Folder, "Nothing selected", "Choose a file to see it here.")
-                } else {
-                    DetailPane(
-                        path = p,
+                when {
+                    p == null -> EmptyState(Icons.Outlined.Folder, "Nothing selected", "Choose a file to see it here.")
+                    p.startsWith(BESIDE) -> BesidePane(p.removePrefix(BESIDE), places,
+                        onPlace = { id -> scope.launch { navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, BESIDE + id) } },
+                        onClose = { scope.launch { navigator.navigateBack() } })
+                    else -> DetailPane(
+                        path = p.substringAfter(FILE_SEP),
+                        place = p.substringBefore(FILE_SEP),
                         showBack = !twoPane,
                         onBack = { scope.launch { navigator.navigateBack() } },
                         onChanged = { vm.refresh() },
                         onOpenFolder = { folder -> vm.open(folder); scope.launch { navigator.navigateBack() } },
-                        onRenamed = { np -> vm.refresh(); scope.launch { navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, np) } },
+                        onRenamed = { np -> vm.refresh(); scope.launch { navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, "${p.substringBefore(FILE_SEP)}$FILE_SEP$np") } },
                         onDeleted = { vm.refresh(); scope.launch { navigator.navigateBack() } },
                     )
                 }
@@ -158,9 +191,31 @@ fun FilesScreen() {
     )
 }
 
+/** A second place next to the first, to drag files between them. Files open in another app. */
 @Composable
-private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) -> Unit) {
+private fun BesidePane(placeId: String, places: List<Place>, onPlace: (String) -> Unit, onClose: () -> Unit) {
     val ctx = LocalContext.current
+    val vm: FilesViewModel = viewModel(key = "beside:$placeId") { FilesViewModel(ctx.graph.places.fs(placeId)) }
+    FolderPane(vm, placeId, places, selected = null, onPlace = onPlace, onBeside = null, onClose = onClose) { e ->
+        if (e.dir) vm.open(e.path) else runCatching { openWith(ctx, placeId, e) }.onFailure { vm.message.value = friendly(it) }
+    }
+}
+
+@Composable
+private fun FolderPane(
+    vm: FilesViewModel,
+    placeId: String,
+    places: List<Place>,
+    selected: String?,
+    onPlace: (String) -> Unit,
+    onBeside: (() -> Unit)?,
+    onClose: (() -> Unit)? = null,
+    onOpen: (Entry) -> Unit,
+) {
+    val ctx = LocalContext.current
+    val place = places.firstOrNull { it.id == placeId }
+    val isBurrow = vm.fs.isBurrow
+    var adding by remember { mutableStateOf(false) }
     val path by vm.path.collectAsState()
     val listing by vm.listing.collectAsState()
     val query by vm.query.collectAsState()
@@ -193,15 +248,15 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
         for (u in uris) {
             runCatching { ctx.contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-            ctx.graph.transfers.upload(u, path)
+            ctx.graph.transfers.upload(u, path, place = placeId)
         }
-        if (uris.isNotEmpty()) vm.message.value = "Sending ${uris.size} file${if (uris.size == 1) "" else "s"} to ${path.substringAfterLast('/')}"
+        if (uris.isNotEmpty()) vm.message.value = "Sending ${uris.size} file${if (uris.size == 1) "" else "s"} to ${path.substringAfterLast('/').ifEmpty { place?.name.orEmpty() }}"
     }
 
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
-    val dd = remember { DragDrop(ctx, scope, vm) { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } }
-    val paneTarget = remember(path, canWrite) { dd.target(path, enabled = canWrite && path.isNotEmpty()) }
+    val dd = remember(placeId) { DragDrop(ctx, scope, vm, placeId) { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } }
+    val paneTarget = remember(path, canWrite, placeId) { dd.target(path, enabled = canWrite && (path.isNotEmpty() || !isBurrow)) }
 
     // the folder name starts large and collapses into the bar as the list scrolls, like the system apps
     val collapse = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -229,10 +284,16 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
                 LargeTopAppBar(
                     scrollBehavior = collapse,
                     colors = barColors,
-                    navigationIcon = { if (path.isNotEmpty()) IconButton(onClick = { vm.up() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Up") } },
-                    title = { Text(path.substringAfterLast('/').ifEmpty { "Burrow" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    navigationIcon = {
+                        if (path.isNotEmpty()) IconButton(onClick = { vm.up() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Up") }
+                        else if (onClose != null) IconButton(onClick = onClose) { Icon(Icons.Outlined.Close, "Close") }
+                    },
+                    title = {
+                        if (path.isEmpty()) PlaceSwitcher(places, placeId, onPlace = onPlace, onAdd = { adding = true })
+                        else Text(path.substringAfterLast('/'), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    },
                     actions = {
-                        IconButton(onClick = { searching = true }) { Icon(Icons.Outlined.Search, "Search") }
+                        if (isBurrow) IconButton(onClick = { searching = true }) { Icon(Icons.Outlined.Search, "Search") }
                         IconButton(onClick = { vm.grid.value = !grid }) { Icon(if (grid) Icons.Outlined.ViewList else Icons.Outlined.GridView, if (grid) "Show as list" else "Show as grid") }
                         IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, "More") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -240,7 +301,8 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
                                 DropdownMenuItem(text = { Text("Upload files here") }, leadingIcon = { Icon(Icons.Outlined.Upload, null) }, onClick = { menu = false; pick.launch(arrayOf("*/*")) })
                                 DropdownMenuItem(text = { Text("New folder") }, leadingIcon = { Icon(Icons.Outlined.CreateNewFolder, null) }, onClick = { menu = false; newFolder = true })
                             }
-                            if (canShare) DropdownMenuItem(text = { Text("Share link to this folder") }, leadingIcon = { Icon(Icons.Outlined.Link, null) }, onClick = { menu = false; shareFolder = true })
+                            if (onBeside != null) DropdownMenuItem(text = { Text("Show another place beside") }, leadingIcon = { Icon(Icons.Outlined.VerticalSplit, null) }, onClick = { menu = false; onBeside() })
+                            if (canShare && placeId == Place.HOME) DropdownMenuItem(text = { Text("Share link to this folder") }, leadingIcon = { Icon(Icons.Outlined.Link, null) }, onClick = { menu = false; shareFolder = true })
                             DropdownMenuItem(text = { Text("Refresh") }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) }, onClick = { menu = false; vm.refresh() })
                         }
                     },
@@ -252,7 +314,7 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
         Box(
             Modifier.padding(pad).fillMaxSize()
                 .dragAndDropTarget(shouldStartDragAndDrop = { e -> e.mimeTypes().isNotEmpty() }, target = paneTarget)
-                .let { if (dd.over == path && path.isNotEmpty()) it.border(3.dp, MaterialTheme.colorScheme.primary) else it },
+                .let { if (dd.over == path && (path.isNotEmpty() || !isBurrow)) it.border(3.dp, MaterialTheme.colorScheme.primary) else it },
         ) {
             val r = results
             when {
@@ -260,24 +322,29 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
                     is Load.Loading -> Busy()
                     is Load.Failed -> EmptyState(Icons.Outlined.WifiOff, r.message, action = "Try again") { vm.search(query) }
                     is Load.Ready -> if (r.value.entries.isEmpty()) EmptyState(Icons.Outlined.SearchOff, "Nothing matches “$query”", "Every word has to appear somewhere in the path.")
-                    else EntryList(r.value.entries, grid = false, selected = selected, showWhere = true, dd = dd, onOpen = open)
+                    else EntryList(r.value.entries, grid = false, selected = selected, showWhere = true, dd = dd, place = placeId, onOpen = open)
                 }
                 searching -> EmptyState(Icons.Outlined.Search, "Search Burrow", "Type part of any file or folder name. ext:pdf and type:video narrow it down.")
                 else -> when (val l = listing) {
                     is Load.Loading -> Busy()
                     is Load.Failed -> EmptyState(Icons.Outlined.WifiOff, l.message, action = "Try again") { vm.refresh() }
                     is Load.Ready -> Column {
-                        if (path.isNotEmpty()) Crumbs(path, dd) { vm.open(it) }
+                        if (path.isNotEmpty()) Crumbs(path, dd, rootName = place?.name ?: "Burrow", rootIsFolder = !isBurrow) { vm.open(it) }
                         if (path.isEmpty() && favorites.isNotEmpty()) Favorites(favorites, open)
                         if (l.value.entries.isEmpty()) {
-                            EmptyState(Icons.Outlined.Folder, if (path.isEmpty()) "No folders yet" else "This folder is empty", if (path.isEmpty()) "Ask an admin to give you access to a folder." else if (canWrite) "Upload files or drag them here." else null)
-                        } else EntryList(l.value.entries, grid = grid, selected = selected, showWhere = false, dd = dd, onOpen = open)
+                            EmptyState(
+                                Icons.Outlined.Folder,
+                                if (path.isEmpty() && isBurrow) "No folders yet" else "This folder is empty",
+                                if (path.isEmpty() && isBurrow) "Ask an admin to give you access to a folder." else if (canWrite) "Upload files or drag them here." else null,
+                            )
+                        } else EntryList(l.value.entries, grid = grid, selected = selected, showWhere = false, dd = dd, place = placeId, onOpen = open)
                     }
                 }
             }
             dd.hint?.let { DropHint(it, Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp)) }
         }
     }
+    if (adding) io.github.xattribution.burrow.ui.settings.AddConnectionDialog(onDismiss = { adding = false }, onAdded = { p -> adding = false; onPlace(p.id) })
     if (shareFolder) io.github.xattribution.burrow.ui.links.NewLinkSheet(path = path, onDismiss = { shareFolder = false }, onCreated = { vm.refresh() })
     if (newFolder) {
         var name by remember { mutableStateOf("") }
@@ -285,7 +352,7 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
             onDismissRequest = { newFolder = false },
             title = { Text("New folder") },
             text = { OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true) },
-            confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = { newFolder = false; vm.act { it.mkdir("$path/${name.trim()}") } }) { Text("Create") } },
+            confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = { newFolder = false; vm.act { it.mkdir(if (path.isEmpty()) name.trim() else "$path/${name.trim()}") } }) { Text("Create") } },
             dismissButton = { TextButton(onClick = { newFolder = false }) { Text("Cancel") } },
         )
     }
@@ -293,7 +360,7 @@ private fun FolderPane(vm: FilesViewModel, selected: String?, onOpen: (Entry) ->
 
 /** The path as a pill: home, then each folder; the folder you're in is in the accent color. */
 @Composable
-private fun Crumbs(path: String, dd: DragDrop?, onOpen: (String) -> Unit) {
+private fun Crumbs(path: String, dd: DragDrop?, rootName: String, rootIsFolder: Boolean, onOpen: (String) -> Unit) {
     val segs = path.split('/')
     val scroll = rememberScrollState()
     LaunchedEffect(path) { scroll.scrollTo(scroll.maxValue) }
@@ -303,7 +370,13 @@ private fun Crumbs(path: String, dd: DragDrop?, onOpen: (String) -> Unit) {
             .horizontalScroll(scroll).padding(horizontal = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(onClick = { onOpen("") }) { Icon(Icons.Filled.Home, "Burrow", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+        val homeLit = dd?.over == "" && rootIsFolder
+        IconButton(
+            onClick = { onOpen("") },
+            modifier = Modifier
+                .let { if (dd != null && rootIsFolder) it.dragAndDropTarget(shouldStartDragAndDrop = { e -> e.mimeTypes().isNotEmpty() }, target = remember(dd) { dd.target("") }) else it }
+                .let { if (homeLit) it.clip(CircleShape).background(MaterialTheme.colorScheme.primary) else it },
+        ) { Icon(Icons.Filled.Home, rootName, tint = if (homeLit) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant) }
         segs.forEachIndexed { i, s ->
             Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             val last = i == segs.size - 1
@@ -335,15 +408,15 @@ private fun Favorites(favs: List<Entry>, onOpen: (Entry) -> Unit) {
 }
 
 @Composable
-fun EntryList(entries: List<Entry>, grid: Boolean, selected: String?, showWhere: Boolean, dd: DragDrop? = null, onOpen: (Entry) -> Unit) {
+fun EntryList(entries: List<Entry>, grid: Boolean, selected: String?, showWhere: Boolean, dd: DragDrop? = null, place: String = Place.HOME, onOpen: (Entry) -> Unit) {
     if (grid) {
         LazyVerticalGrid(columns = GridCells.Adaptive(112.dp), modifier = Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp)) {
-            items(entries, key = { it.path }) { e -> Tile(e, e.path == selected, dd?.over == e.path, Modifier.draggable(e, dd)) { onOpen(e) } }
+            items(entries, key = { it.path }) { e -> Tile(e, place, e.path == selected, dd?.over == e.path, Modifier.draggable(e, dd)) { onOpen(e) } }
         }
     } else {
         LazyColumn(Modifier.fillMaxSize()) {
             items(entries, key = { it.path }) { e ->
-                EntryRow(e, e.path == selected, showWhere, dd?.over == e.path, Modifier.draggable(e, dd)) { onOpen(e) }
+                EntryRow(e, place, e.path == selected, showWhere, dd?.over == e.path, Modifier.draggable(e, dd)) { onOpen(e) }
                 if (e != entries.last()) HorizontalDivider(Modifier.padding(start = 88.dp, end = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
@@ -351,14 +424,14 @@ fun EntryList(entries: List<Entry>, grid: Boolean, selected: String?, showWhere:
 }
 
 @Composable
-private fun EntryRow(e: Entry, selected: Boolean, showWhere: Boolean, lit: Boolean, drag: Modifier, onClick: () -> Unit) {
+private fun EntryRow(e: Entry, place: String, selected: Boolean, showWhere: Boolean, lit: Boolean, drag: Modifier, onClick: () -> Unit) {
     val ctx = LocalContext.current
     val cs = MaterialTheme.colorScheme
     ListItem(
         modifier = drag.combinedClickable(onClick = onClick).padding(vertical = 4.dp),
         colors = if (lit) ListItemDefaults.colors(containerColor = cs.primary, headlineColor = cs.onPrimary, supportingColor = cs.onPrimary, trailingIconColor = cs.onPrimary)
         else ListItemDefaults.colors(containerColor = if (selected) cs.surfaceContainerHigh else Color.Transparent),
-        leadingContent = { Leading(e, 48, if (lit) cs.onPrimary else null) },
+        leadingContent = { Leading(e, place, 48, if (lit) cs.onPrimary else null) },
         headlineContent = { Text(e.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         supportingContent = {
             Column {
@@ -374,23 +447,23 @@ private fun EntryRow(e: Entry, selected: Boolean, showWhere: Boolean, lit: Boole
 }
 
 @Composable
-private fun Tile(e: Entry, selected: Boolean, lit: Boolean, drag: Modifier, onClick: () -> Unit) {
+private fun Tile(e: Entry, place: String, selected: Boolean, lit: Boolean, drag: Modifier, onClick: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     Column(
         Modifier.padding(4.dp).clip(RoundedCornerShape(12.dp)).then(drag).combinedClickable(onClick = onClick)
             .background(when { lit -> cs.primary; selected -> cs.surfaceContainerHighest; else -> cs.surfaceContainerLow }),
     ) {
-        Box(Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.Center) { Leading(e, 0, if (lit) cs.onPrimary else null) }
+        Box(Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.Center) { Leading(e, place, 0, if (lit) cs.onPrimary else null) }
         Text(e.name, style = MaterialTheme.typography.labelMedium, color = if (lit) cs.onPrimary else Color.Unspecified, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(8.dp))
     }
 }
 
 /** A thumbnail for pictures, an icon for everything else. size 0 fills the space. */
 @Composable
-private fun Leading(e: Entry, size: Int, tint: Color? = null) {
+private fun Leading(e: Entry, place: String, size: Int, tint: Color? = null) {
     val m = if (size > 0) Modifier.size(size.dp).clip(RoundedCornerShape(8.dp)) else Modifier.fillMaxSize()
     if (!e.dir && e.kind == "image") {
-        AsyncImage(model = ThumbFetcher.Thumb(e.path, e.mtime), contentDescription = null, contentScale = ContentScale.Crop, modifier = m.background(MaterialTheme.colorScheme.surfaceVariant))
+        AsyncImage(model = ThumbFetcher.Thumb(e.path, e.mtime, place), contentDescription = null, contentScale = ContentScale.Crop, modifier = m.background(MaterialTheme.colorScheme.surfaceVariant))
     } else {
         Box(m, contentAlignment = Alignment.Center) {
             Icon(if (e.dir) Icons.Filled.Folder else kindIcon(e.kind, false), null, Modifier.size(if (size > 0) 36.dp else 48.dp), tint = tint ?: if (e.dir) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
@@ -401,7 +474,7 @@ private fun Leading(e: Entry, size: Int, tint: Color? = null) {
 /** Hold to drag; folders also take drops. Dims while it's the thing being dragged. */
 @Composable
 private fun Modifier.draggable(e: Entry, dd: DragDrop?): Modifier {
-    if (dd == null || !e.path.contains('/')) return this
+    if (dd == null || isLibraryRoot(e, dd)) return this
     return this
         .let { if (dd.lifted == e.path) it.alpha(0.45f) else it }
         .dragAndDropSource { _ -> dd.transfer(e) }
@@ -417,4 +490,41 @@ private fun DropHint(text: String, modifier: Modifier) {
         color = MaterialTheme.colorScheme.onPrimary,
         modifier = modifier.clip(CircleShape).background(MaterialTheme.colorScheme.primary).padding(horizontal = 20.dp, vertical = 12.dp),
     )
+}
+
+/** A Burrow's top entries are libraries, which don't move; an SMB share's are ordinary files. */
+private fun isLibraryRoot(e: Entry, dd: DragDrop) = !e.path.contains('/') && dd.isBurrow
+
+/** The place's name with a menu to switch places or add one. */
+@Composable
+private fun PlaceSwitcher(places: List<Place>, current: String, onPlace: (String) -> Unit, onAdd: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val name = places.firstOrNull { it.id == current }?.name ?: "Burrow"
+    Box {
+        Row(
+            Modifier.clip(RoundedCornerShape(12.dp)).combinedClickable(onClick = { open = true }).padding(end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Icon(Icons.Filled.ArrowDropDown, "Switch place")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            places.forEach { p ->
+                DropdownMenuItem(
+                    text = { Text(p.name, fontWeight = if (p.id == current) FontWeight.SemiBold else FontWeight.Normal) },
+                    leadingIcon = { Icon(placeIcon(p), null, tint = if (p.id == current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) },
+                    trailingIcon = if (p.id == current) ({ Icon(Icons.Filled.Check, null, tint = MaterialTheme.colorScheme.primary) }) else null,
+                    onClick = { open = false; if (p.id != current) onPlace(p.id) },
+                )
+            }
+            HorizontalDivider()
+            DropdownMenuItem(text = { Text("Add a connection") }, leadingIcon = { Icon(Icons.Outlined.Add, null) }, onClick = { open = false; onAdd() })
+        }
+    }
+}
+
+fun placeIcon(p: Place) = when (p) {
+    is Place.Smb -> Icons.Outlined.Lan
+    is Place.Peer -> Icons.Outlined.Dns
+    else -> Icons.Outlined.Storage
 }

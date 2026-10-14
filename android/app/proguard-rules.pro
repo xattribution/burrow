@@ -14,3 +14,12 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.openjsse.**
 -dontwarn javax.naming.**
+
+# smbj (SMB shares): its event bus (mbassador) finds handlers by reflection, and
+# optional Kerberos and expression-language support reference classes Android lacks
+-keep class com.hierynomus.** { *; }
+-keep class net.engio.mbassy.** { *; }
+-keepattributes *Annotation*
+-dontwarn javax.el.**
+-dontwarn org.ietf.jgss.**
+-dontwarn org.slf4j.**

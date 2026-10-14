@@ -142,6 +142,12 @@ class ApiException(val status: Int, message: String, val body: String = "") : Ex
 @Serializable
 data class Conflict(val error: String = "", val conflict: Boolean = false, val exists: Boolean = false, val size: Long = -1, val mtime: Long = -1, val offset: Long = -1)
 
+@Serializable
+data class LinkToken(val token: String = "", val name: String = "", val pin: String = "")
+
+@Serializable
+data class RemoteView(val id: Long = 0, val name: String = "", val error: String = "")
+
 /** Typed access to Burrow's API, through the encrypted channel. */
 class BurrowApi(val channel: BurrowChannel) {
     private suspend fun <T> get(path: String, ser: KSerializer<T>): T = withContext(ioDispatcher) { decode(channel.call("GET", path), ser) }
@@ -173,6 +179,12 @@ class BurrowApi(val channel: BurrowChannel) {
     }
 
     suspend fun settings(): UserSettings = get("/api/settings", UserSettings.serializer())
+
+    /** A REST-only token for this account, for linking this Burrow to another one ("Link to my NAS"). */
+    suspend fun linkToken(): LinkToken = send("POST", "/api/device/link-token", buildJsonObject { }, LinkToken.serializer())
+
+    /** Adds a connected NAS to this Burrow (admins); [config] is what Settings, Connected NAS takes. */
+    suspend fun addRemote(config: JsonObject): RemoteView = send("POST", "/api/remotes", config, RemoteView.serializer())
 
     suspend fun ls(path: String): Listing = get("/api/ls?" + q("path" to path), Listing.serializer())
 

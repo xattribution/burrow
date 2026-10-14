@@ -39,6 +39,9 @@ type TokenScope struct {
 	Tools   map[string]string `json:"tools"`   // tool name: off, ask or on
 	Folders []string          `json:"folders"` // empty: every folder the account can see
 	API     bool              `json:"api"`     // also accepted by the REST API
+	// Access gives the REST API read, share or edit without offering any MCP tool:
+	// for tokens one Burrow uses to reach another. Only Burrow itself sets it.
+	Access []string `json:"access,omitempty"`
 }
 
 // fullScope offers every tool, asking before each call, in every folder, on the API
@@ -85,6 +88,13 @@ func (sc TokenScope) groups() map[string]bool {
 	for _, t := range mcpTools {
 		if m := sc.Tools[t.Name]; m == toolAsk || m == toolOn {
 			on[t.group] = true
+		}
+	}
+	if sc.API {
+		for _, g := range sc.Access {
+			if g == groupRead || g == groupShare || g == groupEdit {
+				on[g] = true
+			}
 		}
 	}
 	return on
@@ -152,7 +162,7 @@ func (a *App) narrow(u *User, sc TokenScope) *User {
 		// no admin powers: act as someone who may view, edit and share every library
 		n.Admin = false
 		n.Grants = nil
-		for _, root := range a.idx.enabledRoots() {
+		for _, root := range append(a.idx.enabledRoots(), a.remoteNames()...) {
 			n.Grants = append(n.Grants, Grant{Path: root, Read: true, Write: true, Share: true})
 		}
 	}

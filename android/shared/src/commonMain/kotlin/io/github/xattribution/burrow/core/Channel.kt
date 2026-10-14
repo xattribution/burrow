@@ -2,6 +2,13 @@
 
 package io.github.xattribution.burrow.core
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -10,7 +17,9 @@ import okio.Buffer
 import okio.BufferedSink
 import okio.BufferedSource
 import okio.buffer
+import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicLong
+import kotlin.concurrent.atomics.decrementAndFetch
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.incrementAndFetch
 import kotlin.time.Clock
@@ -101,7 +110,7 @@ class BurrowChannel(
         val l = live
         if (!renew && l != null && l.session.expiresAt - 120 > now()) return l
         val hs = Hello.request(keys)
-        val resp = postAnywhere("/api/d/hello", OutgoingBody(hs.request.size.toLong()) { it.write(hs.request) })
+        val resp = postFirst("/api/d/hello", OutgoingBody(hs.request.size.toLong()) { it.write(hs.request) })
         val reply = resp.use { r ->
             val bytes = r.body.readByteArray()
             when (r.code) {
@@ -123,6 +132,55 @@ class BurrowChannel(
     /** Forgets which address worked (the phone changed networks); the next request tries them in order. */
     fun forgetRoute() {
         base = null
+    }
+
+    /**
+     * The handshake on a network the phone hasn't used Burrow from yet: every
+     * address is tried, the preferred one first and each next one [STAGGER_MS]
+     * later, and the first that answers like Burrow wins. On a stranger's Wi-Fi
+     * the home address no longer costs a full connect timeout before the public
+     * one is tried, and a box at the home address that isn't Burrow (it answers,
+     * but not with a handshake reply) doesn't stop the search. Only the
+     * handshake races: it has no side effects, and a second one only opens a
+     * session that is never used.
+     */
+    private suspend fun postFirst(path: String, body: OutgoingBody): IncomingResponse {
+        val order = (listOfNotNull(base) + routes.candidates()).distinct()
+        if (base != null || order.size < 2) return postAnywhere(path, body)
+        val winner = CompletableDeferred<Pair<String, IncomingResponse>>()
+        val left = AtomicInt(order.size)
+        var last: Exception? = null
+        // detached, so a losing attempt still connecting doesn't hold up the winner
+        val scope = CoroutineScope(ioDispatcher + SupervisorJob())
+        order.forEachIndexed { i, b ->
+            scope.launch {
+                if (i > 0) delay(STAGGER_MS * i)
+                if (winner.isCompleted) return@launch
+                try {
+                    val r = transport.post(b.trimEnd('/') + path, body)
+                    if (r.code in burrowCodes) {
+                        if (winner.complete(b to r)) return@launch
+                    } else {
+                        last = ChannelException("$b answered ${r.code}, which isn't Burrow.")
+                    }
+                    r.close()
+                } catch (e: UnreachableException) {
+                    routes.failed(b)
+                    last = e
+                } catch (e: Exception) {
+                    last = e
+                }
+                if (left.decrementAndFetch() == 0) winner.completeExceptionally(UnreachableException("Can't reach Burrow (tried ${order.joinToString()}).", last))
+            }
+        }
+        try {
+            val (b, r) = winner.await()
+            base = b
+            routes.succeeded(b)
+            return r
+        } finally {
+            scope.coroutineContext[Job]?.cancelChildren()
+        }
     }
 
     private suspend fun postAnywhere(path: String, body: OutgoingBody): IncomingResponse {
@@ -234,3 +292,9 @@ internal fun errorText(body: ByteArray, fallback: String): String =
 
 /** Reads a whole small reply into a Buffer (for tests and tiny bodies). */
 internal fun BufferedSource.drain(): Buffer = Buffer().also { readAll(it) }
+
+/** Head start the preferred address gets before the next one is tried too. */
+internal const val STAGGER_MS = 300L
+
+/** What a Burrow answers a handshake with; anything else at that address isn't Burrow. */
+private val burrowCodes = setOf(200, 401, 403, 429)

@@ -1,7 +1,8 @@
 package io.github.xattribution.burrow.ui.files
 
 import androidx.lifecycle.ViewModel
-import io.github.xattribution.burrow.data.Connection
+import io.github.xattribution.burrow.data.BurrowFs
+import io.github.xattribution.burrow.data.PlaceFs
 import androidx.lifecycle.viewModelScope
 import io.github.xattribution.burrow.core.Entry
 import io.github.xattribution.burrow.core.Listing
@@ -14,7 +15,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
-class FilesViewModel(private val conn: Connection) : ViewModel() {
+class FilesViewModel(val fs: PlaceFs) : ViewModel() {
+    private val burrow = fs as? BurrowFs
 
     private val _path = MutableStateFlow("")
     val path: StateFlow<String> = _path
@@ -54,8 +56,8 @@ class FilesViewModel(private val conn: Connection) : ViewModel() {
         _listing.value = Load.Loading
         loadJob = viewModelScope.launch {
             _listing.value = try {
-                val l = conn.use { it.ls(p) }
-                if (p.isEmpty()) _favorites.value = runCatching { conn.use { it.favorites() } }.getOrDefault(emptyList())
+                val l = fs.ls(p)
+                if (p.isEmpty() && burrow != null) _favorites.value = runCatching { burrow.conn.use { it.favorites() } }.getOrDefault(emptyList())
                 // folders of mostly photos open as a grid
                 val media = l.entries.count { it.kind == "image" || it.kind == "video" }
                 if (l.entries.isNotEmpty() && media * 2 > l.entries.size) grid.value = true
@@ -79,7 +81,8 @@ class FilesViewModel(private val conn: Connection) : ViewModel() {
             delay(250) // wait for typing to pause
             _results.value = Load.Loading
             _results.value = try {
-                Load.Ready(conn.use { it.search(q.trim(), root = _path.value.ifEmpty { null }) })
+                val b = burrow ?: throw IllegalStateException("Search works on a Burrow; this place isn't indexed.")
+                Load.Ready(b.conn.use { it.search(q.trim(), root = _path.value.ifEmpty { null }) })
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 Load.Failed(friendly(e))
@@ -88,10 +91,10 @@ class FilesViewModel(private val conn: Connection) : ViewModel() {
     }
 
     /** Runs an action, then reloads the folder; failures become a message. */
-    fun act(done: String? = null, block: suspend (io.github.xattribution.burrow.core.BurrowApi) -> Unit) {
+    fun act(done: String? = null, block: suspend (PlaceFs) -> Unit) {
         viewModelScope.launch {
             try {
-                conn.use { block(it) }
+                block(fs)
                 if (done != null) message.value = done
                 refresh()
                 if (_query.value.isNotBlank()) search(_query.value)

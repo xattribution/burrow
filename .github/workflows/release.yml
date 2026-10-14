@@ -58,6 +58,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Android SDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.2" "build-tools;37.0.0" > /dev/null
+      - name: Test SMB server, for the app's SMB connections
+        run: |
+          sudo apt-get update -q > /dev/null && sudo apt-get install -y -q samba > /dev/null
+          sudo ci/smb-server.sh | sed 's/^export //' >> "$GITHUB_ENV"
       - name: Test, lint and build
         working-directory: android
         run: ./gradlew --no-daemon :shared:jvmTest :app:testDebugUnitTest :app:lintDebug :app:assembleDebug

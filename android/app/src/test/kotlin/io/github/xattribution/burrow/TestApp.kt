@@ -12,7 +12,7 @@ class TestApp : BurrowApp() {
         super.onCreate()
     }
 
-    override fun keyWrapper() = object : KeyWrapper {
+    override fun keyWrapper(alias: String) = object : KeyWrapper {
         override fun wrap(plain: ByteArray) = plain.reversedArray()
         override fun unwrap(sealed: ByteArray) = sealed.reversedArray()
     }
