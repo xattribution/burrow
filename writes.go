@@ -312,6 +312,9 @@ func (a *App) apiMkdir(w http.ResponseWriter, r *http.Request) {
 
 // mkdir makes the folder p, and any missing parents when parents is set.
 func (a *App) mkdir(u *User, p string, parents bool) (Entry, error) {
+	if _, _, ok := a.remoteOf(p); ok {
+		return a.remoteMkdir(u, p, parents)
+	}
 	segs := strings.Split(cleanRel(p), "/")
 	if len(segs) < 2 {
 		return Entry{}, errNoWrite
@@ -364,17 +367,31 @@ func (a *App) apiMove(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad request")
 		return
 	}
-	to, err := a.move(userOf(r), in.From, in.To)
+	to, job, err := a.moveJob(userOf(r), in.From, in.To)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, map[string]string{"path": to})
+	out := map[string]string{"path": to}
+	if job != "" {
+		out["job"] = job
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = jsonEncode(w, out)
+		return
+	}
+	writeJSON(w, out)
 }
 
-// move moves or renames fromP to toP without ever replacing anything there, and
-// returns the new library path.
+// move moves or renames fromP to toP (in the background when it has to copy).
 func (a *App) move(u *User, fromP, toP string) (string, error) {
+	to, _, err := a.moveJob(u, fromP, toP)
+	return to, err
+}
+
+// moveLocal moves or renames fromP to toP on this NAS without ever replacing
+// anything there, and returns the new library path.
+func (a *App) moveLocal(u *User, fromP, toP string) (string, error) {
 	from, fromRel, _, err := a.existingWritable(u, fromP)
 	if err != nil {
 		return "", err
@@ -516,6 +533,9 @@ func (a *App) apiDelete(w http.ResponseWriter, r *http.Request) {
 // trash moves p to the trash (only if it is still the version the caller saw, when
 // size and mtime are given) and returns the trash id and p's library path.
 func (a *App) trash(u *User, p string, size, mtime *int64) (string, string, error) {
+	if _, _, ok := a.remoteOf(p); ok {
+		return a.remoteTrash(u, p, size, mtime)
+	}
 	abs, rel, fi, err := a.existingWritable(u, p)
 	if err == nil && size != nil && mtime != nil && !fi.IsDir() && (fi.Size() != *size || mtimeMs(fi) != *mtime) {
 		err = errChanged
@@ -636,6 +656,10 @@ func safeStored(p string) bool {
 func (a *App) apiRestore(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
 	t, ok := a.trashItem(u, r.PathValue("id"))
+	if ok && strings.HasPrefix(t.stored, remoteStored) {
+		a.remoteRestore(w, u, t)
+		return
+	}
 	if !ok || !safeStored(t.stored) {
 		httpErr(w, 404, "not in the trash")
 		return
@@ -683,6 +707,15 @@ func (a *App) apiRestore(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) apiPurge(w http.ResponseWriter, r *http.Request) {
 	t, ok := a.trashItem(userOf(r), r.PathValue("id"))
+	if ok && strings.HasPrefix(t.stored, remoteStored) {
+		if err := a.remotePurge(t.stored); err != nil {
+			httpErr(w, 500, "could not delete it")
+			return
+		}
+		_, _ = a.st.exec(`DELETE FROM trash WHERE id=?`, t.ID)
+		writeJSON(w, map[string]bool{"ok": true})
+		return
+	}
 	if !ok || !safeStored(t.stored) {
 		httpErr(w, 404, "not in the trash")
 		return
@@ -708,7 +741,11 @@ func (a *App) purgeTrash() {
 		}
 		rows.Close()
 		for i := range ids {
-			if safeStored(stored[i]) {
+			if strings.HasPrefix(stored[i], remoteStored) {
+				if a.remotePurge(stored[i]) != nil {
+					continue // the connected NAS is offline: try again next time
+				}
+			} else if safeStored(stored[i]) {
 				_ = os.RemoveAll(filepath.Dir(stored[i]))
 			}
 			_, _ = a.st.exec(`DELETE FROM trash WHERE id=?`, ids[i])
@@ -760,7 +797,11 @@ func (a *App) uploadLock(id string) func() {
 func partName(id string) string { return partPrefix + "up-" + id }
 
 func (a *App) dropUpload(id, dirRel string) {
-	if abs, _, err := a.resolve(dirRel); err == nil {
+	if _, _, ok := a.remoteOf(dirRel); ok {
+		if d, err := a.remotePartsDir(); err == nil {
+			_ = os.Remove(filepath.Join(d, partName(id)))
+		}
+	} else if abs, _, err := a.resolve(dirRel); err == nil {
 		_ = os.Remove(filepath.Join(abs, partName(id)))
 	}
 	_, _ = a.st.exec(`DELETE FROM uploads WHERE id=?`, id)
@@ -799,12 +840,32 @@ func (a *App) apiUploadStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	dabs, dirRel, rel, err := a.newEntry(u, in.Dir, in.Name)
-	if err != nil {
+	var dabs, dirRel, rel string
+	var err error
+	if _, _, remote := a.remoteOf(in.Dir); remote {
+		// the partial file waits in the state folder; the name is checked again at the end
+		var l *remoteLib
+		var inner string
+		if l, dirRel, inner, err = a.remoteUploadTarget(u, in.Dir, in.Name); err == nil {
+			rel = dirRel + "/" + in.Name
+			if in.Conflict == "skip" {
+				var fi fs.FileInfo
+				if l.do(func(c remoteFS) (e error) { fi, e = c.Stat(path.Join(inner, in.Name)); return }) == nil {
+					writeJSON(w, map[string]any{"skipped": true, "path": rel, "size": fi.Size(), "mtime": mtimeMs(fi)})
+					return
+				}
+			}
+			dabs, err = a.remotePartsDir()
+		}
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+	} else if dabs, dirRel, rel, err = a.newEntry(u, in.Dir, in.Name); err != nil {
 		writeErr(w, err)
 		return
 	}
-	if fi, err := os.Lstat(filepath.Join(dabs, in.Name)); err == nil {
+	if fi, err := os.Lstat(filepath.Join(dabs, in.Name)); err == nil && !strings.HasSuffix(dabs, "remote-parts") {
 		if in.Conflict == "skip" {
 			writeJSON(w, map[string]any{"skipped": true, "path": rel, "size": fi.Size(), "mtime": mtimeMs(fi)})
 			return
@@ -886,7 +947,7 @@ func (a *App) apiUploadChunk(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, `{"error":"wrong offset","offset":%d}`, up.Off)
 		return
 	}
-	dabs, _, err := a.writableDir(u, up.Dir)
+	dabs, err := a.partDir(u, up.Dir)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -976,6 +1037,10 @@ func (a *App) apiUploadFinish(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 422, "the file arrived damaged (checksum mismatch); send it again")
 			return
 		}
+	}
+	if _, _, remote := a.remoteOf(up.Dir); remote {
+		a.finishRemoteUpload(w, u, up, sum)
+		return
 	}
 	dabs, dirRel, rel, err := a.newEntry(u, up.Dir, up.Name)
 	if err != nil {

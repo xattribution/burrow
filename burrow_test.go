@@ -25,7 +25,10 @@ type tenv struct {
 	drop string
 }
 
-func setup(t *testing.T) *tenv {
+func setup(t *testing.T) *tenv { t.Helper(); return setupOn(t, false) }
+
+// setupOn is setup, served over TLS (a self-signed test certificate) when tlsOn.
+func setupOn(t *testing.T, tlsOn bool) *tenv {
 	t.Helper()
 	dir := t.TempDir()
 	data := filepath.Join(dir, "data")
@@ -53,10 +56,19 @@ func setup(t *testing.T) *tenv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(app.routes())
+	var srv *httptest.Server
+	if tlsOn {
+		srv = httptest.NewTLSServer(app.routes())
+	} else {
+		srv = httptest.NewServer(app.routes())
+	}
 	t.Cleanup(srv.Close)
 	jar, _ := cookiejar.New(nil)
-	e := &tenv{t: t, app: app, srv: srv, c: &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, data: data, drop: cfg.DropDir}
+	c := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	if tlsOn {
+		c.Transport = srv.Client().Transport
+	}
+	e := &tenv{t: t, app: app, srv: srv, c: c, data: data, drop: cfg.DropDir}
 	// first-launch setup from loopback needs no key; only DOCS and PROJECTS are enabled
 	e.do("POST", "/api/setup", map[string]any{"user": "admin", "password": "longenough1", "roots": []string{"DOCS", "PROJECTS"}}, 200)
 	app.idx.fullScan()

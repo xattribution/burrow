@@ -142,6 +142,7 @@ type Entry struct {
 	Ext    string `json:"ext,omitempty"`
 	Shared int    `json:"shared,omitempty"` // number of active share links on this path
 	Fav    bool   `json:"fav,omitempty"`
+	Remote string `json:"remote,omitempty"` // the top of a connected NAS: smb or burrow
 }
 
 // listDir reads a directory straight from disk so browsing is always current.
@@ -149,6 +150,9 @@ type Entry struct {
 func (a *App) listDir(u *User, rel string) ([]Entry, error) {
 	if cleanRel(rel) == "" {
 		return a.listRoots(u), nil
+	}
+	if l, inner, ok := a.remoteOf(rel); ok {
+		return a.remoteList(u, l, cleanRel(rel), inner)
 	}
 	abs, rel, err := a.resolve(rel)
 	if err != nil {
@@ -194,6 +198,7 @@ func (a *App) listRoots(u *User) []Entry {
 		}
 		out = append(out, entryFromInfo(r, info))
 	}
+	out = append(out, a.remoteRoots(u)...)
 	sortEntries(out)
 	a.decorate(u, out)
 	return out

@@ -67,7 +67,7 @@ mark { background: var(--hit); color: var(--on-hit); padding: 0 1px; }
 
 /* side panel: non-modal record view */
 .panel { inline-size: 380px; border-inline-start: 1px solid var(--rule); background: var(--paper); overflow-y: auto; display: flex; flex-direction: column; }
-.panel[hidden] { display: none; }
+.panel[hidden], .grid2[hidden] { display: none; }
 .panel-head { display: flex; align-items: flex-start; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--rule); }
 .panel-head h2 { font-size: 17px; margin: 4px 0 0; flex: 1; overflow-wrap: anywhere; }
 .panel-body { padding: 12px 14px 30px; display: grid; gap: 14px; align-content: start; }
