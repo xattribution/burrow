@@ -145,6 +145,10 @@ data class Conflict(val error: String = "", val conflict: Boolean = false, val e
 @Serializable
 data class LinkToken(val token: String = "", val name: String = "", val pin: String = "")
 
+/** A one-use invite to Burrow's tethersys bridge, and the bridge's id. The invite is a credential. */
+@Serializable
+data class TetherInvite(val id: String = "", val invite: String = "")
+
 @Serializable
 data class RemoteView(val id: Long = 0, val name: String = "", val error: String = "")
 
@@ -182,6 +186,9 @@ class BurrowApi(val channel: BurrowChannel) {
 
     /** A REST-only token for this account, for linking this Burrow to another one ("Link to my NAS"). */
     suspend fun linkToken(): LinkToken = send("POST", "/api/device/link-token", buildJsonObject { }, LinkToken.serializer())
+
+    /** An invite to Burrow's tethersys bridge for this phone ("Reach from anywhere" must be on). */
+    suspend fun tetherInvite(): TetherInvite = send("POST", "/api/device/tether", buildJsonObject { }, TetherInvite.serializer())
 
     /** Adds a connected NAS to this Burrow (admins); [config] is what Settings, Connected NAS takes. */
     suspend fun addRemote(config: JsonObject): RemoteView = send("POST", "/api/remotes", config, RemoteView.serializer())

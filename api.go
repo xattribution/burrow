@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -44,6 +45,8 @@ type App struct {
 	upLocks   sync.Map     // upload id -> *sync.Mutex
 	remotes   *remoteSet   // connected NAS, by library name
 	jobs      jobSet       // copies between libraries
+	tether    *tether      // reach from anywhere, over tethersys
+	tlsCfg    *tls.Config  // what the listeners serve, for the tether listener too
 }
 
 func newApp(cfg Config, st *Store) (*App, error) {
@@ -67,6 +70,7 @@ func newApp(cfg Config, st *Store) (*App, error) {
 	a.loadRemotes()
 	a.publicUI.Store(st.get("public_ui") == "1")
 	a.publicMCP.Store(st.get("public_mcp") == "1")
+	a.tether = newTether(a)
 	if !a.setupDone() {
 		a.currentSetupKey()
 	}
@@ -169,6 +173,7 @@ func (a *App) routes() http.Handler {
 	}))
 	mux.HandleFunc("GET /api/settings", us(a.apiGetSettings))
 	mux.HandleFunc("PUT /api/settings", admSes(a.apiPutSettings))
+	mux.HandleFunc("GET /api/tether", adm(a.apiTether))
 	mux.HandleFunc("POST /api/password", ses(a.apiPassword))
 	mux.HandleFunc("GET /api/tokens", ses(a.apiTokens))
 	mux.HandleFunc("POST /api/tokens", ses(a.apiNewToken))
@@ -257,6 +262,7 @@ func (a *App) deviceRoutes() http.Handler {
 		{"PATCH /api/device/me", a.apiDeviceUpdate},
 		{"DELETE /api/device/me", a.apiDeviceUnpair},
 		{"POST /api/device/link-token", a.apiDeviceLinkToken},
+		{"POST /api/device/tether", a.apiDeviceTether},
 		{"GET /api/remotes", deviceAdmin(a.apiRemotes)},
 		{"POST /api/remotes", deviceAdmin(a.apiAddRemote)},
 		{"POST /api/remotes/shares", deviceAdmin(a.apiRemoteShares)},
@@ -908,6 +914,7 @@ type Settings struct {
 	PublicUI           bool       `json:"public_ui"`
 	PublicMCP          bool       `json:"public_mcp"`
 	PublicAddr         string     `json:"public_addr"`
+	Tether             bool       `json:"tether"`
 	DataDir            string     `json:"data_dir"`
 	DropDir            string     `json:"drop_dir"`
 	ScanHours          float64    `json:"scan_hours"`
@@ -930,6 +937,7 @@ func (a *App) currentSettings(u *User) Settings {
 		out.DataDir, out.DropDir, out.ScanHours = a.cfg.DataDir, a.cfg.DropDir, a.cfg.ScanInterval.Hours()
 		out.PublicUI, out.PublicMCP, out.PublicAddr = a.publicUI.Load(), a.publicMCP.Load(), a.cfg.PublicAddr
 		out.LanURL = a.st.get("lan_url")
+		out.Tether = a.st.get("tether") == "1"
 	}
 	return out
 }
@@ -949,6 +957,7 @@ func (a *App) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 		DefaultExpiryHours *float64  `json:"default_expiry_hours"`
 		MaxUploadMB        *int64    `json:"max_upload_mb"`
 		AdminCIDRs         *string   `json:"admin_cidrs"`
+		Tether             *bool     `json:"tether"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		httpErr(w, 400, "bad request")
@@ -996,6 +1005,10 @@ func (a *App) apiPutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	setFlag("public_ui", in.PublicUI, &a.publicUI)
 	setFlag("public_mcp", in.PublicMCP, &a.publicMCP)
+	if in.Tether != nil {
+		a.st.set("tether", map[bool]string{true: "1", false: ""}[*in.Tether])
+		a.tether.set(*in.Tether)
+	}
 	if in.Excludes != nil {
 		a.st.set("excludes", strings.TrimSpace(*in.Excludes))
 		a.idx.reloadSettings()

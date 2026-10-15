@@ -23,3 +23,10 @@
 -dontwarn javax.el.**
 -dontwarn org.ietf.jgss.**
 -dontwarn org.slf4j.**
+
+# tethersys (Reach from anywhere): JNA binds the generated bindings to the Rust
+# library by reflection, and calls back into the event listener
+-keep class com.sun.jna.** { *; }
+-keep class * implements com.sun.jna.** { *; }
+-keep class uniffi.tethersys_ffi.** { *; }
+-dontwarn java.awt.**

@@ -20,7 +20,7 @@ import javax.net.ssl.X509TrustManager
  * A real Burrow server for interop tests, built from the Go code in the repo, on
  * loopback with a temporary library. [web] is a signed-in admin browser session.
  */
-class TestServer(private val roots: List<String> = listOf("DOCS", "PHOTOS")) : AutoCloseable {
+class TestServer(private val roots: List<String> = listOf("DOCS", "PHOTOS"), private val env: Map<String, String> = emptyMap()) : AutoCloseable {
     val dir: File = Files.createTempDirectory("burrow-test").toFile()
     val lib = File(dir, "lib")
     private val state = File(dir, "state")
@@ -39,6 +39,7 @@ class TestServer(private val roots: List<String> = listOf("DOCS", "PHOTOS")) : A
             put("BURROW_ADDR", "127.0.0.1:$lanPort")
             put("BURROW_PUBLIC_ADDR", "127.0.0.1:$publicPort")
             put("BURROW_WATCH", "true")
+            putAll(env)
         }
         pb.redirectErrorStream(true).redirectOutput(File(dir, "server.log"))
         proc = pb.start()

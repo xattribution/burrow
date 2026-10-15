@@ -186,6 +186,8 @@ func main() {
 	}
 	app.certs = certs
 	tcfg := tlsConfig(certs, cfg.PQOnly)
+	app.tlsCfg = tcfg
+	app.tether.set(st.get("tether") == "1")
 	if c, _ := certs.get(nil); c != nil {
 		src := "self-signed, " + certs.certFile
 		if cfg.TLSCert != "" {
@@ -238,6 +240,7 @@ func main() {
 	for _, l := range listeners {
 		_ = l.srv.Shutdown(sctx)
 	}
+	app.tether.stop()
 	st.db.Close()
 }
 

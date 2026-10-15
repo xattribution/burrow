@@ -4,3 +4,5 @@ state/
 drop/
 .claude-plugin/
 claude-plugin/
+tether/target/
+android/

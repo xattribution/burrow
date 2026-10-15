@@ -140,6 +140,7 @@ func (a *App) dropDeviceSessions(deviceID string, userID int64) {
 func (a *App) revokeDevices(userID int64) {
 	_, _ = a.st.exec(`DELETE FROM devices WHERE user_id=?`, userID)
 	a.dropDeviceSessions("", userID)
+	go a.tether.reconcile()
 }
 
 func (a *App) deviceExists(id string) bool {
@@ -212,6 +213,7 @@ func (a *App) serverInfo(u *User, deviceID, deviceName string, r *http.Request) 
 		"pins":        a.certPins(),
 		"version":     version,
 		"ttl":         int(devSessionTTL.Seconds()),
+		"tether":      a.tether.running(),
 	}
 }
 
@@ -381,6 +383,7 @@ func (a *App) apiRevokeDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = a.st.exec(`DELETE FROM devices WHERE id=?`, id)
 	a.dropDeviceSessions(id, 0)
+	go a.tether.reconcile()
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -566,6 +569,9 @@ func (a *App) handleHello(w http.ResponseWriter, r *http.Request) {
 
 // via tells the device list whether a device came in at home or from outside.
 func (a *App) via(r *http.Request) string {
+	if viaTether(r) {
+		return "tether"
+	}
 	if publicListener(r) {
 		return "public"
 	}
@@ -790,6 +796,7 @@ func (a *App) apiDeviceUnpair(w http.ResponseWriter, r *http.Request) {
 	id := authOf(r).deviceID
 	_, _ = a.st.exec(`DELETE FROM devices WHERE id=?`, id)
 	a.dropDeviceSessions(id, 0)
+	go a.tether.reconcile()
 	writeJSON(w, map[string]bool{"ok": true})
 }
 

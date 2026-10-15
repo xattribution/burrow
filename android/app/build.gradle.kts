@@ -59,6 +59,8 @@ android {
     }
 
     packaging {
+        // compressed in the APK: the tethersys library is most of its size otherwise
+        jniLibs.useLegacyPackaging = true
         resources.excludes += setOf("META-INF/versions/9/OSGI-INF/MANIFEST.MF", "META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*", "META-INF/*.kotlin_module")
     }
 
@@ -66,10 +68,13 @@ android {
         unitTests.isIncludeAndroidResources = true
         unitTests.all {
             it.systemProperty("robolectric.graphicsMode", "NATIVE")
+            it.systemProperty("robolectric.logging", "stdout")
             it.systemProperty("burrow.repo", rootProject.projectDir.parentFile.absolutePath)
+            // tether/build.sh puts a host build of the tethersys library here
+            it.systemProperty("jna.library.path", rootProject.projectDir.resolve("tether/build/host").absolutePath)
             it.maxHeapSize = "3g"
             // Robolectric reaches into JDK internals on newer JDKs
-            it.jvmArgs("--add-exports=java.base/jdk.internal.access=ALL-UNNAMED", "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED", "--add-opens=java.base/java.io=ALL-UNNAMED", "--add-opens=java.base/java.lang=ALL-UNNAMED", "--add-opens=java.base/java.nio=ALL-UNNAMED", "--add-opens=java.base/java.util=ALL-UNNAMED")
+            it.jvmArgs("--add-exports=java.base/jdk.internal.access=ALL-UNNAMED", "--add-exports=java.base/jdk.internal.ref=ALL-UNNAMED", "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED", "--add-opens=java.base/java.io=ALL-UNNAMED", "--add-opens=java.base/java.lang=ALL-UNNAMED", "--add-opens=java.base/java.nio=ALL-UNNAMED", "--add-opens=java.base/java.util=ALL-UNNAMED")
         }
     }
 
@@ -77,6 +82,14 @@ android {
         abortOnError = true
         checkReleaseBuilds = true
         disable += setOf("GradleDependency", "NewerVersionAvailable", "AndroidGradlePluginVersion", "ObsoleteLintCustomCheck")
+    }
+}
+
+// Phones are arm64. The x86_64 tethersys library (for emulators) stays out of
+// release builds; other ABIs still install and just don't reach Burrow over tethersys.
+androidComponents {
+    onVariants(selector().withBuildType("release")) { v ->
+        v.packaging.jniLibs.excludes.add("lib/x86_64/libtethersys_ffi.so")
     }
 }
 
@@ -113,6 +126,8 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.documentfile)
     implementation(libs.smbj)
+    // tethersys (Reach from anywhere): the generated bindings call the Rust library through JNA
+    implementation(libs.jna) { artifact { type = "aar" } }
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)
 
@@ -125,6 +140,7 @@ dependencies {
     testImplementation(libs.coroutines.test)
     testImplementation(libs.sqldelight.jvm)
     testImplementation(libs.work.testing)
+    testImplementation(libs.jna)
 
     androidTestImplementation(libs.test.runner)
     androidTestImplementation(libs.test.rules)

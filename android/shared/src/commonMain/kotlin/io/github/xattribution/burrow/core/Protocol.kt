@@ -54,6 +54,8 @@ data class ServerInfo(
     val pins: List<String> = emptyList(),
     val version: String = "",
     val ttl: Int = 3600,
+    /** The tethersys id of Burrow's bridge while "Reach from anywhere" is on, else empty. */
+    val tether: String = "",
 )
 
 @Serializable

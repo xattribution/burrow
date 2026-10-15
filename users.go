@@ -604,6 +604,7 @@ func (a *App) apiDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.dropDeviceSessions("", id)
+	go a.tether.reconcile()
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
