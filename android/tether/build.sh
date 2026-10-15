@@ -13,11 +13,14 @@ rev=$(sed -n 's/^tethersys = .*rev = "\([0-9a-f]*\)".*/\1/p' "$repo/tether/Cargo
 [ -n "$rev" ] || { echo "no tethersys rev in tether/Cargo.toml" >&2; exit 1; }
 src=$(realpath -m "${TETHERSYS_SRC:-$here/build/tethersys}")
 
+# CI's cache may restore $src/target before there is a checkout, so init in place rather than clone
 if [ ! -d "$src/.git" ]; then
-  git clone -q https://github.com/xattribution/tethersys "$src"
+  mkdir -p "$src"
+  git -C "$src" init -q
+  git -C "$src" remote add origin https://github.com/xattribution/tethersys
 fi
-git -C "$src" cat-file -e "$rev^{commit}" 2>/dev/null || git -C "$src" fetch -q origin "$rev" || git -C "$src" fetch -q origin
-git -C "$src" -c advice.detachedHead=false checkout -q "$rev"
+git -C "$src" cat-file -e "$rev^{commit}" 2>/dev/null || git -C "$src" fetch -q --depth 1 origin "$rev" || git -C "$src" fetch -q origin
+git -C "$src" -c advice.detachedHead=false checkout -q -f "$rev"
 
 # small over fast: the library ships in the APK
 export CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
