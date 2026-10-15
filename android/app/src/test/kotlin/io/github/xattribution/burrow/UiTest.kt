@@ -254,7 +254,8 @@ class UiTest {
             shot("unfolded-phone-picked")
             compose.onNodeWithContentDescription("Copy to").performClick()
             waitFor("Copy 2 items")
-            compose.onAllNodesWithText("DOCS").fetchSemanticsNodes().size.let { n -> compose.onAllNodesWithText("DOCS")[n - 1].performClick() }
+            // DOCS in the picker, not the one in the list behind it
+            compose.onNode(hasText("DOCS") and androidx.compose.ui.test.hasAnyAncestor(androidx.compose.ui.test.isDialog()) and androidx.compose.ui.test.hasClickAction()).performClick()
             waitFor("Into DOCS")
             compose.onNodeWithText("Copy here").performClick()
             runBlocking { androidx.work.testing.TestListenableWorkerBuilder<io.github.xattribution.burrow.work.TransferWorker>(app).build().doWork() }
