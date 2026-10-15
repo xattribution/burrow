@@ -7,6 +7,7 @@ import coil3.PlatformContext
 import coil3.SingletonImageLoader
 import io.github.xattribution.burrow.data.KeyWrapper
 import io.github.xattribution.burrow.data.KeystoreWrapper
+import io.github.xattribution.burrow.data.PhoneAccess
 
 open class BurrowApp : Application(), SingletonImageLoader.Factory {
     lateinit var graph: AppGraph
@@ -14,7 +15,7 @@ open class BurrowApp : Application(), SingletonImageLoader.Factory {
 
     override fun onCreate() {
         super.onCreate()
-        graph = AppGraph(this, ::keyWrapper)
+        graph = AppGraph(this, ::keyWrapper, ::phoneAccess)
         graph.notifications.createChannels()
         graph.scheduler.reschedule()
         Thread { tidyCache() }.start()
@@ -26,6 +27,9 @@ open class BurrowApp : Application(), SingletonImageLoader.Factory {
         cacheDir.resolve("open").listFiles()?.filter { now - it.lastModified() > 86_400_000 }?.forEach { it.delete() }
         cacheDir.resolve("outbox").listFiles()?.filter { now - it.lastModified() > 7 * 86_400_000L }?.forEach { it.deleteRecursively() }
     }
+
+    /** Whether Burrow may read all of the phone's storage (tests swap it out). */
+    open fun phoneAccess(): Boolean = PhoneAccess.granted(this)
 
     /** Where keys and passwords are sealed: the Android Keystore (tests swap it out). */
     open fun keyWrapper(alias: String = "burrow-device-key"): KeyWrapper = KeystoreWrapper(alias)

@@ -9,6 +9,7 @@ import android.provider.DocumentsContract
 import android.provider.MediaStore
 import io.github.xattribution.burrow.core.LocalEntry
 import io.github.xattribution.burrow.core.LocalTree
+import io.github.xattribution.burrow.graph
 import okio.BufferedSink
 import okio.Source
 import okio.buffer
@@ -19,7 +20,40 @@ import java.io.FileNotFoundException
 /** The local side of a pair, from what is stored in its row. */
 fun localTreeFor(context: Context, uri: String): LocalTree = when {
     uri.startsWith(MediaTree.PREFIX) -> MediaTree(context.contentResolver, context.checkSelfPermission(android.Manifest.permission.ACCESS_MEDIA_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+    uri.startsWith("file:") -> java.io.File(Uri.parse(uri).path ?: "/").let { root ->
+        PhoneTree(root, volumeTop = phoneVolumes(context).any { it.root.absolutePath == root.absolutePath }) { context.graph.phoneAccess() }
+    }
     else -> SafTree(context.contentResolver, Uri.parse(uri))
+}
+
+/**
+ * Any folder on the phone, read as plain files with All files access: Downloads,
+ * the top of the storage or a memory card, which the system folder picker won't
+ * hand out. Hidden files and Burrow's own partial downloads aren't synced.
+ */
+class PhoneTree(private val root: java.io.File, private val volumeTop: Boolean, private val access: () -> Boolean) : LocalTree {
+    private val files = io.github.xattribution.burrow.core.FileTree(root)
+
+    private fun check() {
+        if (!access()) throw java.io.IOException("Burrow no longer has access to all files. Turn it back on to sync ${root.name}.")
+        if (!root.isDirectory) throw java.io.IOException("${root.path} isn't there any more (a memory card that was taken out?).")
+    }
+
+    override suspend fun list(): List<LocalEntry> {
+        check()
+        // at the top of a volume, Android/ holds apps' own folders, which aren't the user's to sync
+        return files.list().filter { e -> e.path.split('/').none { it.startsWith(".") } && !(volumeTop && (e.path == "Android" || e.path.startsWith("Android/"))) }
+    }
+
+    override suspend fun stat(path: String): LocalEntry? = files.stat(path)
+    override fun open(path: String): Source = files.open(path)
+    override suspend fun write(path: String, mtime: Long, body: (BufferedSink) -> Unit): LocalEntry {
+        check()
+        return files.write(path, mtime, body)
+    }
+    override suspend fun mkdirs(path: String) = files.mkdirs(path)
+    override suspend fun delete(path: String) = files.delete(path)
+    override suspend fun rename(from: String, to: String) = files.rename(from, to)
 }
 
 /**

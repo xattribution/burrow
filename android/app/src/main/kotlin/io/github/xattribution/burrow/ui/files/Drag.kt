@@ -34,7 +34,7 @@ class DragDrop(
     private val onLift: () -> Unit,
 ) {
     /** What a drag inside the app carries, so the list it lands on knows where it came from. */
-    data class Dragged(val place: String, val entry: Entry)
+    data class Dragged(val place: String, val entries: List<Entry>)
 
     val isBurrow = vm.fs.isBurrow
     private val rootWritable = !isBurrow // an SMB share's top is a folder; a Burrow's is the list of libraries
@@ -48,15 +48,19 @@ class DragDrop(
     var lifted by mutableStateOf<String?>(null)
         private set
 
-    fun transfer(e: Entry): DragAndDropTransferData {
+    /** Dragging a picked item takes everything picked along. */
+    fun transfer(e: Entry, picked: List<Entry> = emptyList()): DragAndDropTransferData {
+        val group = if (picked.any { it.path == e.path }) picked else listOf(e)
         lifted = e.path
         onLift()
-        if (e.dir) {
-            // folders only move inside Burrow, so the drag stays in this app
-            return DragAndDropTransferData(ClipData.newPlainText(e.name, e.name), localState = Dragged(place, e), flags = 0)
+        val files = group.filter { !it.dir }
+        if (files.isEmpty()) {
+            // folders don't leave the app: other apps can't take a folder
+            return DragAndDropTransferData(ClipData.newPlainText(e.name, e.name), localState = Dragged(place, group), flags = 0)
         }
-        val clip = ClipData(e.name, arrayOf(RemoteFileProvider.mimeOf(e.name)), ClipData.Item(RemoteFileProvider.uriFor(ctx, e, place)))
-        return DragAndDropTransferData(clip, localState = Dragged(place, e), flags = View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ)
+        val clip = ClipData(e.name, files.map { RemoteFileProvider.mimeOf(it.name) }.distinct().toTypedArray(), ClipData.Item(RemoteFileProvider.uriFor(ctx, files[0], place)))
+        files.drop(1).forEach { clip.addItem(ClipData.Item(RemoteFileProvider.uriFor(ctx, it, place))) }
+        return DragAndDropTransferData(clip, localState = Dragged(place, group), flags = View.DRAG_FLAG_GLOBAL or View.DRAG_FLAG_GLOBAL_URI_READ)
     }
 
     /** A drop target for [dir]; with [enabled] false it only notices the drag end. */
@@ -64,7 +68,7 @@ class DragDrop(
         override fun onEntered(event: DragAndDropEvent) {
             if (!enabled) return
             val m = moving(event)
-            if (m != null && m.place == place && !canMove(m.entry.path, dir, rootWritable)) return
+            if (m != null && m.place == place && m.entries.none { canMove(it.path, dir, rootWritable) }) return
             over = dir
             val verb = when {
                 m == null -> "Upload to "
@@ -99,16 +103,18 @@ class DragDrop(
     private fun drop(event: DragAndDropEvent, dir: String): Boolean {
         val m = moving(event)
         if (m != null) {
-            val e = m.entry
             val where = dir.substringAfterLast('/').ifEmpty { ctx.graph.places.get(place)?.name ?: "Burrow" }
+            val what = if (m.entries.size == 1) m.entries[0].name else "${m.entries.size} items"
             if (m.place != place) {
-                // between places: a copy through the phone, the original stays
-                ctx.graph.transfers.copy(m.place, e, place, dir, move = false)
-                vm.message.value = "Copying ${e.name} to $where"
+                // between places: a copy through the phone, the originals stay
+                m.entries.forEach { ctx.graph.transfers.copy(m.place, it, place, dir, move = false) }
+                vm.message.value = "Copying $what to $where"
                 return true
             }
-            if (!canMove(e.path, dir, rootWritable)) return false
-            vm.act(done = "Moved ${e.name} to $where") { it.move(e.path, if (dir.isEmpty()) e.name else "$dir/${e.name}") }
+            val movable = m.entries.filter { canMove(it.path, dir, rootWritable) }
+            if (movable.isEmpty()) return false
+            vm.picked.value = emptySet()
+            vm.act(done = "Moved $what to $where") { fs -> movable.forEach { fs.move(it.path, if (dir.isEmpty()) it.name else "$dir/${it.name}") } }
             return true
         }
         val de = event.toAndroidDragEvent()

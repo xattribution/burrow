@@ -19,6 +19,14 @@ import io.github.xattribution.burrow.data.Opened
 import io.github.xattribution.burrow.data.Place
 import io.github.xattribution.burrow.data.PlaceFs
 import io.github.xattribution.burrow.data.Places
+import io.github.xattribution.burrow.data.PhoneFs
+import android.media.ThumbnailUtils
+import android.util.Size
+import coil3.asImage
+import coil3.fetch.ImageFetchResult
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okio.Path.Companion.toOkioPath
 import kotlinx.coroutines.runBlocking
 import okio.Buffer
 import okio.FileSystem
@@ -34,6 +42,15 @@ class ThumbFetcher(private val places: Places, private val t: Thumb) : Fetcher {
 
     override suspend fun fetch(): FetchResult? {
         val fs = places.fs(t.place)
+        if (fs is PhoneFs) {
+            val f = fs.file(t.path)
+            if (videoExt(t.path)) {
+                // a frame from the video, the way the gallery shows it
+                val bmp = withContext(Dispatchers.IO) { ThumbnailUtils.createVideoThumbnail(f, Size(320, 320), null) }
+                return ImageFetchResult(bmp.asImage(), true, CoilSource.DISK)
+            }
+            return SourceFetchResult(ImageSource(f.toOkioPath(), FileSystem.SYSTEM), null, CoilSource.DISK)
+        }
         if (fs is BurrowFs) {
             val bytes = fs.conn.use { it.thumb(t.path) } ?: throw IOException("no preview")
             return SourceFetchResult(ImageSource(Buffer().write(bytes), FileSystem.SYSTEM), "image/jpeg", CoilSource.NETWORK)
@@ -54,8 +71,11 @@ class ThumbFetcher(private val places: Places, private val t: Thumb) : Fetcher {
 class FileImageFetcher(private val places: Places, private val img: Image) : Fetcher {
     data class Image(val path: String, val mtime: Long, val place: String = Place.HOME)
 
-    override suspend fun fetch(): FetchResult =
-        SourceFetchResult(ImageSource(readCapped(places.fs(img.place), img.path), FileSystem.SYSTEM), null, CoilSource.NETWORK)
+    override suspend fun fetch(): FetchResult {
+        val fs = places.fs(img.place)
+        if (fs is PhoneFs) return SourceFetchResult(ImageSource(fs.file(img.path).toOkioPath(), FileSystem.SYSTEM), null, CoilSource.DISK)
+        return SourceFetchResult(ImageSource(readCapped(fs, img.path), FileSystem.SYSTEM), null, CoilSource.NETWORK)
+    }
 
     class Factory(private val places: Places) : Fetcher.Factory<Image> {
         override fun create(data: Image, options: Options, imageLoader: ImageLoader) = FileImageFetcher(places, data)
@@ -65,6 +85,8 @@ class FileImageFetcher(private val places: Places, private val img: Image) : Fet
         override fun key(data: Image, options: Options) = "file:${data.place}:${data.mtime}:${data.path}"
     }
 }
+
+private fun videoExt(path: String) = path.substringAfterLast('.', "").lowercase() in setOf("mp4", "mov", "mkv", "webm", "m4v", "3gp", "avi")
 
 /** A picture's bytes, up to 60 MB (bigger isn't worth decoding on a phone). */
 private suspend fun readCapped(fs: PlaceFs, path: String): Buffer {

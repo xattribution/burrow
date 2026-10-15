@@ -116,6 +116,12 @@ import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Lan
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.VerticalSplit
+import androidx.compose.material.icons.outlined.Checklist
+import androidx.compose.material.icons.outlined.FolderOff
+import androidx.compose.material.icons.outlined.FolderShared
+import androidx.compose.material.icons.outlined.PhoneAndroid
+import androidx.compose.material.icons.outlined.SdCard
+import androidx.compose.material.icons.outlined.Usb
 import io.github.xattribution.burrow.graph
 import io.github.xattribution.burrow.media.ThumbFetcher
 import io.github.xattribution.burrow.ui.common.Busy
@@ -223,6 +229,9 @@ private fun FolderPane(
     val favorites by vm.favorites.collectAsState()
     val grid by vm.grid.collectAsState()
     val message by vm.message.collectAsState()
+    val picked by vm.picked.collectAsState()
+    val needsAccess by vm.needsAccess.collectAsState()
+    val requestAccess = rememberPhoneAccessRequest { if (it) vm.refresh() }
     val snack = remember { SnackbarHostState() }
     var searching by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
@@ -242,9 +251,17 @@ private fun FolderPane(
     LaunchedEffect(message) {
         message?.let { snack.showSnackbar(it); vm.message.value = null }
     }
-    BackHandler(enabled = searching || path.isNotEmpty()) {
-        if (searching) { searching = false; vm.search("") } else vm.up()
+    BackHandler(enabled = picked.isNotEmpty() || searching || path.isNotEmpty()) {
+        when {
+            picked.isNotEmpty() -> vm.picked.value = emptySet()
+            searching -> { searching = false; vm.search("") }
+            else -> vm.up()
+        }
     }
+    // what is on screen, to turn picked paths back into entries
+    val shown: List<Entry> = (if (searching) (results as? Load.Ready)?.value?.entries else (listing as? Load.Ready)?.value?.entries).orEmpty()
+    val pickedEntries = shown.filter { it.path in picked }
+    var acting by remember { mutableStateOf<String?>(null) } // "copy", "move" or "delete" for the picked items
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
         for (u in uris) {
             runCatching { ctx.contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
@@ -256,6 +273,15 @@ private fun FolderPane(
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
     val dd = remember(placeId) { DragDrop(ctx, scope, vm, placeId) { haptic.performHapticFeedback(HapticFeedbackType.LongPress) } }
+    val pickable: (Entry) -> Boolean = { e -> !isLibraryRoot(e, dd) }
+    val list: @Composable (List<Entry>, Boolean, Boolean) -> Unit = { entries, asGrid, where ->
+        EntryList(
+            entries, grid = asGrid, selected = selected, showWhere = where, dd = dd, place = placeId,
+            picked = picked, pickedEntries = pickedEntries,
+            onPick = { e -> if (pickable(e)) { haptic.performHapticFeedback(HapticFeedbackType.LongPress); vm.pick(e.path) } },
+            onOpen = { e -> if (picked.isNotEmpty()) { if (pickable(e)) vm.pick(e.path) } else open(e) },
+        )
+    }
     val paneTarget = remember(path, canWrite, placeId) { dd.target(path, enabled = canWrite && (path.isNotEmpty() || !isBurrow)) }
 
     // the folder name starts large and collapses into the bar as the list scrolls, like the system apps
@@ -268,7 +294,19 @@ private fun FolderPane(
         modifier = if (searching) Modifier else Modifier.nestedScroll(collapse.nestedScrollConnection),
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
-            if (searching) {
+            if (picked.isNotEmpty()) {
+                PickBar(
+                    count = picked.size,
+                    canChange = canWrite || searching,
+                    hasFiles = pickedEntries.any { !it.dir },
+                    onClear = { vm.picked.value = emptySet() },
+                    onAll = { vm.picked.value = shown.filter(pickable).map { it.path }.toSet() },
+                    onSend = { runCatching { sendFiles(ctx, placeId, pickedEntries.filter { !it.dir }) }.onFailure { vm.message.value = friendly(it) } },
+                    onCopy = { acting = "copy" },
+                    onMove = { acting = "move" },
+                    onDelete = { acting = "delete" },
+                )
+            } else if (searching) {
                 TopAppBar(
                     navigationIcon = { IconButton(onClick = { searching = false; vm.search("") }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Close search") } },
                     title = {
@@ -293,7 +331,7 @@ private fun FolderPane(
                         else Text(path.substringAfterLast('/'), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     },
                     actions = {
-                        if (isBurrow) IconButton(onClick = { searching = true }) { Icon(Icons.Outlined.Search, "Search") }
+                        if (isBurrow || vm.fs.canSearch) IconButton(onClick = { searching = true }) { Icon(Icons.Outlined.Search, "Search") }
                         IconButton(onClick = { vm.grid.value = !grid }) { Icon(if (grid) Icons.Outlined.ViewList else Icons.Outlined.GridView, if (grid) "Show as list" else "Show as grid") }
                         IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, "More") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -303,6 +341,7 @@ private fun FolderPane(
                             }
                             if (onBeside != null) DropdownMenuItem(text = { Text("Show another place beside") }, leadingIcon = { Icon(Icons.Outlined.VerticalSplit, null) }, onClick = { menu = false; onBeside() })
                             if (canShare && placeId == Place.HOME) DropdownMenuItem(text = { Text("Share link to this folder") }, leadingIcon = { Icon(Icons.Outlined.Link, null) }, onClick = { menu = false; shareFolder = true })
+                            if (shown.any(pickable)) DropdownMenuItem(text = { Text("Select") }, leadingIcon = { Icon(Icons.Outlined.Checklist, null) }, onClick = { menu = false; shown.firstOrNull(pickable)?.let { vm.pick(it.path) } })
                             DropdownMenuItem(text = { Text("Refresh") }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) }, onClick = { menu = false; vm.refresh() })
                         }
                     },
@@ -321,13 +360,15 @@ private fun FolderPane(
                 searching && r != null -> when (r) {
                     is Load.Loading -> Busy()
                     is Load.Failed -> EmptyState(Icons.Outlined.WifiOff, r.message, action = "Try again") { vm.search(query) }
-                    is Load.Ready -> if (r.value.entries.isEmpty()) EmptyState(Icons.Outlined.SearchOff, "Nothing matches “$query”", "Every word has to appear somewhere in the path.")
-                    else EntryList(r.value.entries, grid = false, selected = selected, showWhere = true, dd = dd, place = placeId, onOpen = open)
+                    is Load.Ready -> if (r.value.entries.isEmpty()) EmptyState(Icons.Outlined.SearchOff, "Nothing matches “$query”", if (isBurrow) "Every word has to appear somewhere in the path." else "Every word has to appear in the name.")
+                    else list(r.value.entries, false, true)
                 }
-                searching -> EmptyState(Icons.Outlined.Search, "Search Burrow", "Type part of any file or folder name. ext:pdf and type:video narrow it down.")
+                searching -> if (isBurrow) EmptyState(Icons.Outlined.Search, "Search Burrow", "Type part of any file or folder name. ext:pdf and type:video narrow it down.")
+                else EmptyState(Icons.Outlined.Search, "Search ${path.substringAfterLast('/').ifEmpty { place?.name ?: "here" }}", "Type part of a file or folder name.")
                 else -> when (val l = listing) {
                     is Load.Loading -> Busy()
-                    is Load.Failed -> EmptyState(Icons.Outlined.WifiOff, l.message, action = "Try again") { vm.refresh() }
+                    is Load.Failed -> if (needsAccess) EmptyState(Icons.Outlined.FolderOff, "Burrow needs access to all files", "Android asks for it once, in Settings.", action = "Allow access") { requestAccess() }
+                    else EmptyState(Icons.Outlined.WifiOff, l.message, action = "Try again") { vm.refresh() }
                     is Load.Ready -> Column {
                         if (path.isNotEmpty()) Crumbs(path, dd, rootName = place?.name ?: "Burrow", rootIsFolder = !isBurrow) { vm.open(it) }
                         if (path.isEmpty() && favorites.isNotEmpty()) Favorites(favorites, open)
@@ -337,7 +378,7 @@ private fun FolderPane(
                                 if (path.isEmpty() && isBurrow) "No folders yet" else "This folder is empty",
                                 if (path.isEmpty() && isBurrow) "Ask an admin to give you access to a folder." else if (canWrite) "Upload files or drag them here." else null,
                             )
-                        } else EntryList(l.value.entries, grid = grid, selected = selected, showWhere = false, dd = dd, place = placeId, onOpen = open)
+                        } else list(l.value.entries, grid, false)
                     }
                 }
             }
@@ -346,6 +387,40 @@ private fun FolderPane(
     }
     if (adding) io.github.xattribution.burrow.ui.settings.AddConnectionDialog(onDismiss = { adding = false }, onAdded = { p -> adding = false; onPlace(p.id) })
     if (shareFolder) io.github.xattribution.burrow.ui.links.NewLinkSheet(path = path, onDismiss = { shareFolder = false }, onCreated = { vm.refresh() })
+    when (val a = acting) {
+        "copy", "move" -> PlaceTargetPicker(
+            title = (if (a == "move") "Move " else "Copy ") + (if (pickedEntries.size == 1) pickedEntries[0].name else "${pickedEntries.size} items"),
+            confirm = if (a == "move") "Move here" else "Copy here",
+            onDismiss = { acting = null },
+            onPick = { dst, dir ->
+                acting = null
+                val items = pickedEntries
+                vm.picked.value = emptySet()
+                val where = dir.substringAfterLast('/').ifEmpty { ctx.graph.places.get(dst)?.name ?: "Burrow" }
+                val what = if (items.size == 1) items[0].name else "${items.size} items"
+                if (dst == placeId && a == "move") {
+                    vm.act(done = "Moved $what to $where") { fs -> items.filter { DragDrop.canMove(it.path, dir, !isBurrow) }.forEach { fs.move(it.path, if (dir.isEmpty()) it.name else "$dir/${it.name}") } }
+                } else {
+                    items.forEach { ctx.graph.transfers.copy(placeId, it, dst, dir, a == "move") }
+                    vm.message.value = (if (a == "move") "Moving " else "Copying ") + "$what to $where"
+                }
+            },
+        )
+        "delete" -> AlertDialog(
+            onDismissRequest = { acting = null },
+            title = { Text("Delete " + (if (pickedEntries.size == 1) pickedEntries[0].name else "${pickedEntries.size} items") + "?") },
+            text = { Text(deleteNote(place)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    acting = null
+                    val items = pickedEntries
+                    vm.picked.value = emptySet()
+                    vm.act(done = "Deleted " + if (items.size == 1) items[0].name else "${items.size} items") { fs -> items.forEach { fs.delete(it.path) } }
+                }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { acting = null }) { Text("Cancel") } },
+        )
+    }
     if (newFolder) {
         var name by remember { mutableStateOf("") }
         AlertDialog(
@@ -408,15 +483,26 @@ private fun Favorites(favs: List<Entry>, onOpen: (Entry) -> Unit) {
 }
 
 @Composable
-fun EntryList(entries: List<Entry>, grid: Boolean, selected: String?, showWhere: Boolean, dd: DragDrop? = null, place: String = Place.HOME, onOpen: (Entry) -> Unit) {
+fun EntryList(
+    entries: List<Entry>,
+    grid: Boolean,
+    selected: String?,
+    showWhere: Boolean,
+    dd: DragDrop? = null,
+    place: String = Place.HOME,
+    picked: Set<String> = emptySet(),
+    pickedEntries: List<Entry> = emptyList(),
+    onPick: ((Entry) -> Unit)? = null,
+    onOpen: (Entry) -> Unit,
+) {
     if (grid) {
         LazyVerticalGrid(columns = GridCells.Adaptive(112.dp), modifier = Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp)) {
-            items(entries, key = { it.path }) { e -> Tile(e, place, e.path == selected, dd?.over == e.path, Modifier.draggable(e, dd)) { onOpen(e) } }
+            items(entries, key = { it.path }) { e -> Tile(e, place, e.path == selected, e.path in picked, dd?.over == e.path, Modifier.draggable(e, dd, pickedEntries), onPick?.let { { it(e) } }) { onOpen(e) } }
         }
     } else {
         LazyColumn(Modifier.fillMaxSize()) {
             items(entries, key = { it.path }) { e ->
-                EntryRow(e, place, e.path == selected, showWhere, dd?.over == e.path, Modifier.draggable(e, dd)) { onOpen(e) }
+                EntryRow(e, place, e.path == selected, e.path in picked, showWhere, dd?.over == e.path, Modifier.draggable(e, dd, pickedEntries), onPick?.let { { it(e) } }) { onOpen(e) }
                 if (e != entries.last()) HorizontalDivider(Modifier.padding(start = 88.dp, end = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
@@ -424,14 +510,17 @@ fun EntryList(entries: List<Entry>, grid: Boolean, selected: String?, showWhere:
 }
 
 @Composable
-private fun EntryRow(e: Entry, place: String, selected: Boolean, showWhere: Boolean, lit: Boolean, drag: Modifier, onClick: () -> Unit) {
+private fun EntryRow(e: Entry, place: String, selected: Boolean, picked: Boolean, showWhere: Boolean, lit: Boolean, drag: Modifier, onLongClick: (() -> Unit)?, onClick: () -> Unit) {
     val ctx = LocalContext.current
     val cs = MaterialTheme.colorScheme
     ListItem(
-        modifier = drag.combinedClickable(onClick = onClick).padding(vertical = 4.dp),
-        colors = if (lit) ListItemDefaults.colors(containerColor = cs.primary, headlineColor = cs.onPrimary, supportingColor = cs.onPrimary, trailingIconColor = cs.onPrimary)
-        else ListItemDefaults.colors(containerColor = if (selected) cs.surfaceContainerHigh else Color.Transparent),
-        leadingContent = { Leading(e, place, 48, if (lit) cs.onPrimary else null) },
+        modifier = drag.combinedClickable(onClick = onClick, onLongClick = onLongClick, onLongClickLabel = if (onLongClick != null) "Select" else null).padding(vertical = 4.dp),
+        colors = when {
+            lit -> ListItemDefaults.colors(containerColor = cs.primary, headlineColor = cs.onPrimary, supportingColor = cs.onPrimary, trailingIconColor = cs.onPrimary)
+            picked -> ListItemDefaults.colors(containerColor = cs.primaryContainer, headlineColor = cs.onPrimaryContainer, supportingColor = cs.onPrimaryContainer)
+            else -> ListItemDefaults.colors(containerColor = if (selected) cs.surfaceContainerHigh else Color.Transparent)
+        },
+        leadingContent = { if (picked) PickedMark(48) else Leading(e, place, 48, if (lit) cs.onPrimary else null) },
         headlineContent = { Text(e.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         supportingContent = {
             Column {
@@ -447,14 +536,17 @@ private fun EntryRow(e: Entry, place: String, selected: Boolean, showWhere: Bool
 }
 
 @Composable
-private fun Tile(e: Entry, place: String, selected: Boolean, lit: Boolean, drag: Modifier, onClick: () -> Unit) {
+private fun Tile(e: Entry, place: String, selected: Boolean, picked: Boolean, lit: Boolean, drag: Modifier, onLongClick: (() -> Unit)?, onClick: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     Column(
-        Modifier.padding(4.dp).clip(RoundedCornerShape(12.dp)).then(drag).combinedClickable(onClick = onClick)
-            .background(when { lit -> cs.primary; selected -> cs.surfaceContainerHighest; else -> cs.surfaceContainerLow }),
+        Modifier.padding(4.dp).clip(RoundedCornerShape(12.dp)).then(drag).combinedClickable(onClick = onClick, onLongClick = onLongClick, onLongClickLabel = if (onLongClick != null) "Select" else null)
+            .background(when { lit -> cs.primary; picked -> cs.primaryContainer; selected -> cs.surfaceContainerHighest; else -> cs.surfaceContainerLow }),
     ) {
-        Box(Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.Center) { Leading(e, place, 0, if (lit) cs.onPrimary else null) }
-        Text(e.name, style = MaterialTheme.typography.labelMedium, color = if (lit) cs.onPrimary else Color.Unspecified, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(8.dp))
+        Box(Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment = Alignment.Center) {
+            Leading(e, place, 0, if (lit) cs.onPrimary else null)
+            if (picked) Box(Modifier.align(Alignment.TopStart).padding(8.dp)) { PickedMark(28) }
+        }
+        Text(e.name, style = MaterialTheme.typography.labelMedium, color = when { lit -> cs.onPrimary; picked -> cs.onPrimaryContainer; else -> Color.Unspecified }, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(8.dp))
     }
 }
 
@@ -462,7 +554,8 @@ private fun Tile(e: Entry, place: String, selected: Boolean, lit: Boolean, drag:
 @Composable
 private fun Leading(e: Entry, place: String, size: Int, tint: Color? = null) {
     val m = if (size > 0) Modifier.size(size.dp).clip(RoundedCornerShape(8.dp)) else Modifier.fillMaxSize()
-    if (!e.dir && e.kind == "image") {
+    // pictures everywhere; videos on the phone itself, where a frame is cheap to read
+    if (!e.dir && (e.kind == "image" || (e.kind == "video" && place.startsWithPhone()))) {
         AsyncImage(model = ThumbFetcher.Thumb(e.path, e.mtime, place), contentDescription = null, contentScale = ContentScale.Crop, modifier = m.background(MaterialTheme.colorScheme.surfaceVariant))
     } else {
         Box(m, contentAlignment = Alignment.Center) {
@@ -471,13 +564,23 @@ private fun Leading(e: Entry, place: String, size: Int, tint: Color? = null) {
     }
 }
 
-/** Hold to drag; folders also take drops. Dims while it's the thing being dragged. */
+private fun String.startsWithPhone() = this == Place.PHONE || startsWith("vol-")
+
+/** A picked item: a check in a solid circle where its icon was. */
 @Composable
-private fun Modifier.draggable(e: Entry, dd: DragDrop?): Modifier {
+private fun PickedMark(size: Int) {
+    Box(Modifier.size(size.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary), contentAlignment = Alignment.Center) {
+        Icon(Icons.Filled.Check, "Selected", Modifier.size((size * 0.6f).dp), tint = MaterialTheme.colorScheme.onPrimary)
+    }
+}
+
+/** Hold and move to drag (a picked item takes the others along); folders also take drops. Dims while it's the thing being dragged. */
+@Composable
+private fun Modifier.draggable(e: Entry, dd: DragDrop?, picked: List<Entry> = emptyList()): Modifier {
     if (dd == null || isLibraryRoot(e, dd)) return this
     return this
         .let { if (dd.lifted == e.path) it.alpha(0.45f) else it }
-        .dragAndDropSource { _ -> dd.transfer(e) }
+        .dragAndDropSource { _ -> dd.transfer(e, picked) }
         .let { if (e.dir) it.dragAndDropTarget(shouldStartDragAndDrop = { ev -> ev.mimeTypes().isNotEmpty() }, target = remember(e.path) { dd.target(e.path) }) else it }
 }
 
@@ -526,5 +629,7 @@ private fun PlaceSwitcher(places: List<Place>, current: String, onPlace: (String
 fun placeIcon(p: Place) = when (p) {
     is Place.Smb -> Icons.Outlined.Lan
     is Place.Peer -> Icons.Outlined.Dns
+    is Place.Phone -> if (!p.removable) Icons.Outlined.PhoneAndroid else if (p.name.contains("usb", ignoreCase = true)) Icons.Outlined.Usb else Icons.Outlined.SdCard
+    is Place.Folder -> Icons.Outlined.FolderShared
     else -> Icons.Outlined.Storage
 }

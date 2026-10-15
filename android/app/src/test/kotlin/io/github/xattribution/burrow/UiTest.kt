@@ -12,6 +12,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.printToLog
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.longClick
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import com.github.takahirom.roborazzi.captureRoboImage
@@ -214,22 +216,56 @@ class UiTest {
         }
     }
 
-    /** Unfolded: a second place beside the first, to drag between them. */
+    /**
+     * Unfolded: the phone's own storage beside Burrow. It asks for All files
+     * access first; then files there can be picked and copied to the NAS.
+     */
     @Test
-    fun anotherPlaceBesideWhenUnfolded() {
+    fun phoneStorageBesideBurrow() {
         pairAt(UNFOLDED)
-        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
-        TestServer(listOf("DOCS", "SHARED")).use { peer ->
-            File(peer.lib, "SHARED/Trip/beach.txt").apply { parentFile!!.mkdirs(); writeText("sand") }
-            runBlocking { ctx.graph.places.pairPeer(io.github.xattribution.burrow.core.PairingLink.parse(peer.pairingLink()), "Alex's Burrow", "Test phone") }
-            switchPlace()
-            compose.onAllNodesWithText("Burrow", useUnmergedTree = true).fetchSemanticsNodes().size.let { n -> compose.onAllNodesWithText("Burrow", useUnmergedTree = true)[n - 1].performClick() }
+        val app = ApplicationProvider.getApplicationContext<TestApp>()
+        val top = android.os.Environment.getExternalStorageDirectory()
+        File(top, "Download/report.pdf").apply { parentFile!!.mkdirs(); writeText("%PDF-1.4 report") }
+        File(top, "Download/trip.txt").writeText("tickets")
+        File(top, "Download/.pending").writeText("hidden")
+        app.allFiles = false
+        try {
             compose.onNodeWithContentDescription("More").performClick()
             compose.onNodeWithText("Show another place beside").performClick()
-            waitFor("SHARED")
-            // this phone's Burrow on the left, Alex's on the right
-            assertTrue(compose.onAllNodesWithText("PHOTOS").fetchSemanticsNodes().isNotEmpty())
+            waitFor("Burrow needs access to all files")
+            shot("unfolded-phone-access")
+
+            // the switch turned on in Android's settings, then back in the app
+            app.allFiles = true
+            compose.onAllNodesWithContentDescription("More")[1].performClick()
+            compose.onNodeWithText("Refresh").performClick()
+            waitFor("Download")
+            compose.onNodeWithText("Download").performClick()
+            waitFor("report.pdf")
+            assertTrue("hidden files stay hidden", compose.onAllNodesWithText(".pending").fetchSemanticsNodes().isEmpty())
+            assertTrue("Burrow stays on the left", compose.onAllNodesWithText("PHOTOS").fetchSemanticsNodes().isNotEmpty())
             shot("unfolded-beside")
+
+            // hold to pick, tap to add, then copy both to the NAS
+            compose.onNodeWithText("report.pdf").performTouchInput { longClick() }
+            waitFor("1 selected")
+            compose.onNodeWithText("trip.txt").performClick()
+            waitFor("2 selected")
+            shot("unfolded-phone-picked")
+            compose.onNodeWithContentDescription("Copy to").performClick()
+            waitFor("Copy 2 items")
+            compose.onAllNodesWithText("DOCS").fetchSemanticsNodes().size.let { n -> compose.onAllNodesWithText("DOCS")[n - 1].performClick() }
+            waitFor("Into DOCS")
+            compose.onNodeWithText("Copy here").performClick()
+            runBlocking { androidx.work.testing.TestListenableWorkerBuilder<io.github.xattribution.burrow.work.TransferWorker>(app).build().doWork() }
+            assertEquals("%PDF-1.4 report", File(server.lib, "DOCS/report.pdf").readText())
+            assertEquals("tickets", File(server.lib, "DOCS/trip.txt").readText())
+            assertTrue("a copy leaves the originals", File(top, "Download/report.pdf").exists())
+        } finally {
+            File(server.lib, "DOCS/report.pdf").delete()
+            File(server.lib, "DOCS/trip.txt").delete()
+            File(top, "Download").deleteRecursively()
+            app.allFiles = false
         }
     }
 

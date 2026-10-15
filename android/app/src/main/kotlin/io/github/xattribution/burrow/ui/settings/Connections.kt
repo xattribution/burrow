@@ -72,6 +72,7 @@ fun ConnectionRow(p: Place, homeIsAdmin: Boolean, onMessage: (String) -> Unit) {
     val where = when (p) {
         is Place.Smb -> "SMB ${p.settings.host}/${p.settings.share}" + if (p.settings.folder.isNotEmpty()) "/${p.settings.folder}" else ""
         is Place.Peer -> p.store.current?.info?.let { i -> "Burrow ${i.public.ifBlank { i.lan }}, as ${i.user}" } ?: "Burrow"
+        is Place.Folder -> "App folder, ${p.tree.authority.orEmpty()}"
         else -> ""
     }
     ListItem(
@@ -82,7 +83,7 @@ fun ConnectionRow(p: Place, homeIsAdmin: Boolean, onMessage: (String) -> Unit) {
         trailingContent = {
             IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, "More for ${p.name}") }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                if (homeIsAdmin) DropdownMenuItem(text = { Text("Link to my NAS") }, onClick = {
+                if (homeIsAdmin && (p is Place.Smb || p is Place.Peer)) DropdownMenuItem(text = { Text("Link to my NAS") }, onClick = {
                     menu = false
                     scope.launch { onMessage(runCatching { g.places.linkToHome(p.id, homeIsAdmin) }.getOrElse { friendly(it) }) }
                 })
@@ -93,7 +94,15 @@ fun ConnectionRow(p: Place, homeIsAdmin: Boolean, onMessage: (String) -> Unit) {
     if (removing) AlertDialog(
         onDismissRequest = { removing = false },
         title = { Text("Remove ${p.name}?") },
-        text = { Text(if (p is Place.Peer) "This phone is removed from that Burrow too. Files there stay where they are." else "The sign-in is forgotten. Files on the share stay where they are.") },
+        text = {
+            Text(
+                when (p) {
+                    is Place.Peer -> "This phone is removed from that Burrow too. Files there stay where they are."
+                    is Place.Folder -> "Burrow lets go of the folder. Its files stay where they are."
+                    else -> "The sign-in is forgotten. Files on the share stay where they are."
+                },
+            )
+        },
         confirmButton = { TextButton(onClick = { removing = false; scope.launch { g.places.remove(p.id) } }) { Text("Remove") } },
         dismissButton = { TextButton(onClick = { removing = false }) { Text("Cancel") } },
     )
@@ -113,6 +122,17 @@ fun AddConnectionDialog(onDismiss: () -> Unit, onAdded: (Place) -> Unit) {
     var link by remember { mutableStateOf("") }
     var scanning by remember { mutableStateOf(false) }
     val camera = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok -> if (ok) scanning = true else error = "Scanning needs the camera. Paste the link instead." }
+    // a folder from another app (a cloud drive app, Termux, a USB drive the system shows)
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            try {
+                ctx.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                onAdded(g.places.addFolder(uri))
+            } catch (e: Exception) {
+                error = friendly(e)
+            }
+        }
+    }
     // SMB
     var host by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("") }
@@ -125,6 +145,7 @@ fun AddConnectionDialog(onDismiss: () -> Unit, onAdded: (Place) -> Unit) {
     val parsed = remember(link) { link.trim().takeIf { it.isNotEmpty() }?.let { runCatching { PairingLink.parse(it) }.getOrNull() } }
     val ready = !busy && when (kind) {
         "burrow" -> parsed != null
+        "folder" -> false
         else -> host.isNotBlank() && share.isNotBlank()
     }
     AlertDialog(
@@ -133,12 +154,14 @@ fun AddConnectionDialog(onDismiss: () -> Unit, onAdded: (Place) -> Unit) {
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    listOf("burrow" to "Another Burrow", "smb" to "SMB share").forEachIndexed { i, (k, l) ->
-                        SegmentedButton(selected = kind == k, onClick = { kind = k; error = null }, shape = SegmentedButtonDefaults.itemShape(i, 2)) { Text(l) }
+                    listOf("burrow" to "Burrow", "smb" to "SMB share", "folder" to "App folder").forEachIndexed { i, (k, l) ->
+                        SegmentedButton(selected = kind == k, onClick = { kind = k; error = null }, shape = SegmentedButtonDefaults.itemShape(i, 3)) { Text(l, maxLines = 1) }
                     }
                 }
-                OutlinedTextField(name, { name = it }, label = { Text("Name") }, placeholder = { Text(if (kind == "smb") "Office NAS" else "Alex's Burrow") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                if (kind == "burrow") {
+                if (kind != "folder") OutlinedTextField(name, { name = it }, label = { Text("Name") }, placeholder = { Text(if (kind == "smb") "Office NAS" else "Alex's Burrow") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                if (kind == "folder") {
+                    OutlinedButton(onClick = { folderPicker.launch(null) }) { Text("Pick a folder from an app") }
+                } else if (kind == "burrow") {
                     if (scanning) {
                         QrScanner(onCode = { link = it; scanning = false }, modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(16.dp)))
                         TextButton(onClick = { scanning = false }) { Text("Cancel scanning") }
