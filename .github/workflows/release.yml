@@ -8,17 +8,57 @@ permissions:
   contents: read
   packages: write
 jobs:
+  # tethersys, for Reach from anywhere: the bridge that runs next to Burrow, and
+  # the app's library (Android ABIs, a host copy for the JVM tests, the Kotlin
+  # bindings), all at the revision pinned in tether/Cargo.toml.
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: 'aarch64-linux-android,x86_64-linux-android' }
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-ndk }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tether
+            android/tether/build/tethersys
+      - name: Bridge
+        working-directory: tether
+        run: cargo fmt --check && cargo clippy --release --locked -- -D warnings && cargo build --release --locked
+      - name: App library
+        env: { TETHERSYS_SRC: android/tether/build/tethersys }
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          android/tether/build.sh
+      - name: The committed bindings match the pinned revision
+        run: git diff --exit-code android/app/src/main/kotlin/uniffi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native
+          path: |
+            tether/target/release/burrow-tether
+            android/app/src/main/jniLibs
+            android/tether/build/host
+          retention-days: 7
+
   test:
+    needs: native
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
+      - uses: actions/download-artifact@v4
+        with: { name: native }
+      - run: chmod +x tether/target/release/burrow-tether
       - name: Test SMB server, for the connected-NAS tests
         run: |
           sudo apt-get update -q > /dev/null && sudo apt-get install -y -q samba > /dev/null
           sudo ci/smb-server.sh | sed 's/^export //' >> "$GITHUB_ENV"
       - run: go vet ./... && go test ./...
+        env: { BURROW_TEST_TETHER_BIN: '${{ github.workspace }}/tether/target/release/burrow-tether' }
   image:
     needs: test
     if: github.event_name != 'pull_request'
@@ -48,9 +88,13 @@ jobs:
   # The phone app: shared-core tests against the real server, UI tests at phone,
   # foldable and tablet sizes, lint, and a debug APK to try out.
   android:
+    needs: native
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: native }
+      - run: chmod +x tether/target/release/burrow-tether
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - uses: actions/setup-java@v4
@@ -84,9 +128,13 @@ jobs:
   # photo backup from the media library, background sync through WorkManager,
   # and the R8-shrunk release build paired and browsed through its own screens.
   android-device:
+    needs: native
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: native }
+      - run: chmod +x tether/target/release/burrow-tether
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - uses: actions/setup-java@v4
@@ -126,6 +174,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: native }
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '21' }
       - uses: gradle/actions/setup-gradle@v4

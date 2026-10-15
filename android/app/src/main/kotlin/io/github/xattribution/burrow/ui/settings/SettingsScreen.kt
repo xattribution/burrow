@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.RestoreFromTrash
@@ -65,6 +66,7 @@ import io.github.xattribution.burrow.ui.common.formatSize
 import io.github.xattribution.burrow.ui.common.formatWhen
 import io.github.xattribution.burrow.ui.common.friendly
 import kotlinx.coroutines.launch
+import uniffi.tethersys_ffi.FfiLink
 
 @Composable
 fun SettingsScreen(pairLink: String?, onLinkUsed: () -> Unit) {
@@ -81,7 +83,9 @@ fun SettingsScreen(pairLink: String?, onLinkUsed: () -> Unit) {
     var message by remember { mutableStateOf<String?>(null) }
     var addingPlace by remember { mutableStateOf(false) }
     val places by g.places.list.collectAsState()
+    val tetherLinks by g.tether.links.collectAsState()
     val p = paired ?: return
+    val tetherLink = tetherLinks[p.info.tether]
     if (addingPlace) AddConnectionDialog(onDismiss = { addingPlace = false }, onAdded = { pl -> addingPlace = false; message = "Connected to ${pl.name}. Pick it at the top of Files." })
 
     LaunchedEffect(trashTick) {
@@ -102,7 +106,15 @@ fun SettingsScreen(pairLink: String?, onLinkUsed: () -> Unit) {
                         Card(Modifier.fillMaxWidth()) {
                             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 val (icon, text) = when (val s = status) {
-                                    is Link.Online -> (if (s.atHome) Icons.Outlined.Home else Icons.Outlined.Public) to (if (s.atHome) "Connected at home" else "Connected from outside")
+                                    is Link.Online -> when {
+                                        s.tethered -> Icons.Outlined.Hub to when (tetherLink) {
+                                            FfiLink.DIRECT -> "Connected over tethersys, directly"
+                                            FfiLink.RELAYED -> "Connected over tethersys, through a relay"
+                                            else -> "Connected over tethersys"
+                                        }
+                                        s.atHome -> Icons.Outlined.Home to "Connected at home"
+                                        else -> Icons.Outlined.Public to "Connected from outside"
+                                    }
                                     is Link.Offline -> Icons.Outlined.CloudOff to s.message
                                     is Link.Disabled -> Icons.Outlined.CloudOff to s.message
                                     else -> Icons.Outlined.Lock to "Not connected yet"
@@ -124,6 +136,12 @@ fun SettingsScreen(pairLink: String?, onLinkUsed: () -> Unit) {
                         Text("Addresses", style = MaterialTheme.typography.titleSmall)
                         Text("At home: ${p.home ?: "not set"}", style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
                         Text("Away: ${p.away ?: "not set"}", style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
+                        if (p.info.tether.isNotEmpty()) {
+                            Text(
+                                "Anywhere: tethersys ${p.info.tether.take(10)}" + if (!g.tether.usable) " (not available on this phone)" else "",
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            )
+                        }
                         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                             val opts = listOf(RoutePreference.AUTO to "Automatic", RoutePreference.HOME to "Home only", RoutePreference.AWAY to "Away only")
                             opts.forEachIndexed { i, (v, l) ->

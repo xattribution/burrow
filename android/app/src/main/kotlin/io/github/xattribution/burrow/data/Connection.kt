@@ -18,13 +18,20 @@ import io.github.xattribution.burrow.core.PairResult
 import io.github.xattribution.burrow.core.PairingLink
 import io.github.xattribution.burrow.core.Routes
 import io.github.xattribution.burrow.core.UnreachableException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.cancellation.CancellationException
 
 /** How the app is reaching Burrow right now. */
 sealed interface Link {
     data object Unknown : Link
-    data class Online(val atHome: Boolean, val base: String) : Link
+    /** [tethered]: through Burrow's tethersys bridge rather than one of its addresses. */
+    data class Online(val atHome: Boolean, val base: String, val tethered: Boolean = false) : Link
     data class Offline(val message: String) : Link
     data class Disabled(val message: String) : Link
     data object Removed : Link
@@ -34,9 +41,17 @@ sealed interface Link {
  * Picks the address for the network the phone is on: the home address first on
  * Wi-Fi or Ethernet, the public one first elsewhere. Trying the home address
  * on a stranger's Wi-Fi is harmless: nothing reusable is ever sent, and a server
- * that isn't Burrow can't answer the handshake.
+ * that isn't Burrow can't answer the handshake. The tethersys forward, when
+ * Burrow offers one, comes last everywhere: it works from any network, but an
+ * address of Burrow's own is the shorter way when one answers.
  */
-class NetworkRoutes(context: Context, private val paired: () -> Paired?, onChange: () -> Unit) : Routes {
+class NetworkRoutes(
+    context: Context,
+    private val paired: () -> Paired?,
+    private val tether: () -> String? = { null },
+    private val openTether: suspend () -> Unit = {},
+    onChange: () -> Unit,
+) : Routes {
     private val cm = context.getSystemService(ConnectivityManager::class.java)
 
     init {
@@ -58,32 +73,49 @@ class NetworkRoutes(context: Context, private val paired: () -> Paired?, onChang
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
     }
 
+    override suspend fun prepare() {
+        if (paired()?.preference != RoutePreference.HOME) openTether()
+    }
+
     override fun candidates(): List<String> {
         val p = paired() ?: return emptyList()
         val home = p.home
         val away = p.away
+        val t = tether()
         return when (p.preference) {
             RoutePreference.HOME -> listOfNotNull(home)
-            RoutePreference.AWAY -> listOfNotNull(away)
+            RoutePreference.AWAY -> listOfNotNull(away, t)
             RoutePreference.AUTO -> {
                 val caps = cm.getNetworkCapabilities(cm.activeNetwork)
                 val vpn = caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
                 when {
-                    onHomeNetwork() -> listOfNotNull(home, away)
-                    vpn -> listOfNotNull(away, home)
-                    else -> listOfNotNull(away ?: home)
+                    onHomeNetwork() -> listOfNotNull(home, away, t)
+                    vpn -> listOfNotNull(away, home, t)
+                    else -> listOfNotNull(away ?: home, t)
                 }
             }
-        }
+        }.distinct()
     }
 }
 
-class Connection(context: Context, private val device: DeviceStore) {
+class Connection(context: Context, private val device: DeviceStore, private val tether: Tether? = null) {
     private val transport = OkHttpTransport(BurrowTls.client({ device.current?.info?.pins?.toSet().orEmpty() }))
     private val _status = MutableStateFlow<Link>(Link.Unknown)
     val status: StateFlow<Link> = _status
     private var cached: Pair<DeviceKeys, BurrowApi>? = null
-    val routes = NetworkRoutes(context, { device.current }) { synchronized(this) { cached?.second?.channel?.forgetRoute() } }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val enrolling = AtomicBoolean(false)
+    @Volatile private var lastEnroll = 0L
+
+    /** Burrow's tethersys bridge, while "Reach from anywhere" is on there. */
+    private fun bridge(): String? = device.current?.info?.tether?.takeIf { it.isNotEmpty() }
+
+    val routes = NetworkRoutes(
+        context,
+        paired = { device.current },
+        tether = { bridge()?.let { tether?.openBase(it) } },
+        openTether = { bridge()?.let { tether?.base(it) } },
+    ) { synchronized(this) { cached?.second?.channel?.forgetRoute() } }
 
     /** The API for the paired server, or null when this phone isn't paired. */
     fun api(): BurrowApi? = synchronized(this) {
@@ -98,7 +130,8 @@ class Connection(context: Context, private val device: DeviceStore) {
         try {
             val r = block(api)
             val base = api.channel.activeBase.orEmpty()
-            _status.value = Link.Online(base.isNotEmpty() && base == device.current?.home, base)
+            _status.value = Link.Online(base.isNotEmpty() && base == device.current?.home, base, tether?.carries(base) == true)
+            enroll(api)
             return r
         } catch (e: NotPairedException) {
             forget()
@@ -109,6 +142,35 @@ class Connection(context: Context, private val device: DeviceStore) {
         } catch (e: UnreachableException) {
             _status.value = Link.Offline(if (routes.candidates().isEmpty()) "No address to reach Burrow from this network." else "Can't reach Burrow right now.")
             throw e
+        }
+    }
+
+    /**
+     * Pairs with Burrow's tethersys bridge in the background, once Burrow says it
+     * has one: an invite comes through the channel and is used right away. Tried
+     * again at most every ten minutes if it fails.
+     */
+    private fun enroll(api: BurrowApi) {
+        val t = tether ?: return
+        val id = bridge() ?: return
+        if (!t.usable || t.openBase(id) != null) return
+        val now = System.currentTimeMillis()
+        if (now - lastEnroll < 600_000 || !enrolling.compareAndSet(false, true)) return
+        lastEnroll = now
+        scope.launch {
+            try {
+                if (!t.knows(id)) {
+                    val inv = api.tetherInvite()
+                    if (inv.id == id) t.join(inv.invite)
+                }
+                if (t.base(id) != null) lastEnroll = 0
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                // never the invite itself: it is a credential
+                android.util.Log.w(Tether.TAG, "joining Burrow's bridge failed: ${e.javaClass.simpleName}: ${e.message}")
+            } finally {
+                enrolling.set(false)
+            }
         }
     }
 
@@ -129,6 +191,7 @@ class Connection(context: Context, private val device: DeviceStore) {
 
     private fun forget() {
         synchronized(this) { cached = null }
+        bridge()?.let { id -> tether?.let { t -> scope.launch { t.forget(id) } } }
         device.clear()
         _status.value = Link.Removed
     }

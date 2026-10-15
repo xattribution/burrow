@@ -42,7 +42,7 @@ private data class PlaceRecord(val id: String, val kind: String, val name: Strin
  * passwords are sealed with the Android Keystore and never sent to this phone's
  * own Burrow, unless "Link to my NAS" hands one over on purpose.
  */
-class Places(private val app: Context, private val home: Connection, private val wrapper: (String) -> KeyWrapper) {
+class Places(private val app: Context, private val home: Connection, private val tether: Tether?, private val wrapper: (String) -> KeyWrapper) {
     private val prefs = app.getSharedPreferences("places", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
     private val sealer by lazy { wrapper("burrow-places") }
@@ -64,7 +64,7 @@ class Places(private val app: Context, private val home: Connection, private val
         when (r.kind) {
             "burrow" -> peers[r.id]?.copy(name = r.name) ?: run {
                 val store = DeviceStore(app, wrapper("burrow-peer-${r.id}"), "peer-${r.id}")
-                if (store.current == null) null else Place.Peer(r.id, r.name, store, Connection(app, store)).also { peers[r.id] = it }
+                if (store.current == null) null else Place.Peer(r.id, r.name, store, Connection(app, store, tether)).also { peers[r.id] = it }
             }
             "smb" -> runCatching {
                 val plain = sealer.unwrap(Base64.decode(r.sealed, Base64.NO_WRAP))
@@ -103,7 +103,7 @@ class Places(private val app: Context, private val home: Connection, private val
     suspend fun pairPeer(link: PairingLink, name: String, deviceName: String): Place.Peer {
         val id = newId()
         val store = DeviceStore(app, wrapper("burrow-peer-$id"), "peer-$id")
-        val conn = Connection(app, store)
+        val conn = Connection(app, store, tether)
         try {
             conn.pair(link, deviceName)
         } catch (e: Exception) {

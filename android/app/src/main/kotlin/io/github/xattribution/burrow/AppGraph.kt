@@ -1,6 +1,7 @@
 package io.github.xattribution.burrow
 
 import android.app.Application
+import android.os.Build
 import app.cash.sqldelight.driver.android.AndroidSqliteDriver
 import coil3.ImageLoader
 import coil3.disk.DiskCache
@@ -11,6 +12,7 @@ import io.github.xattribution.burrow.data.Connection
 import io.github.xattribution.burrow.data.DeviceStore
 import io.github.xattribution.burrow.data.KeyWrapper
 import io.github.xattribution.burrow.data.Places
+import io.github.xattribution.burrow.data.Tether
 import io.github.xattribution.burrow.media.FileImageFetcher
 import io.github.xattribution.burrow.media.ThumbFetcher
 import io.github.xattribution.burrow.work.Notifications
@@ -22,8 +24,9 @@ import okio.Path.Companion.toOkioPath
 class AppGraph(val app: Application, keyWrapper: (String) -> KeyWrapper) {
     val db: BurrowDb by lazy { BurrowDb(AndroidSqliteDriver(BurrowDb.Schema, app, "burrow.db")) }
     val device = DeviceStore(app, keyWrapper("burrow-device-key"))
-    val connection = Connection(app, device)
-    val places = Places(app, connection, keyWrapper)
+    val tether = Tether(app.filesDir.resolve("tether"), { device.current?.info?.deviceName?.ifBlank { null } ?: Build.MODEL })
+    val connection = Connection(app, device, tether)
+    val places = Places(app, connection, tether, keyWrapper)
     val notifications = Notifications(app)
     val scheduler = SyncScheduler(app) { db }
     val transfers = Transfers(app) { db }

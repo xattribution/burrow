@@ -1,0 +1,23 @@
+[package]
+name = "burrow-tether"
+description = "Reach Burrow from anywhere without port forwarding, over tethersys."
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+publish = false
+
+[dependencies]
+# Pinned: the bridge and the app's bindings must speak the same protocol.
+tethersys = { git = "https://github.com/xattribution/tethersys", rev = "d589c6e62e6e6156bafa564df88b88b52db6f050" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true

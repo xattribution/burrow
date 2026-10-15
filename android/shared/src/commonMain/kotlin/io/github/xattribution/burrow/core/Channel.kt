@@ -43,6 +43,8 @@ class UnreachableException(message: String, cause: Throwable? = null) : Exceptio
 
 /** Which base addresses to try, best first, and what happened when they were tried. */
 interface Routes {
+    /** Called before addresses are picked, to get one ready that takes a moment (a tethersys forward). */
+    suspend fun prepare() {}
     fun candidates(): List<String>
     fun succeeded(base: String) {}
     fun failed(base: String) {}
@@ -145,6 +147,7 @@ class BurrowChannel(
      * session that is never used.
      */
     private suspend fun postFirst(path: String, body: OutgoingBody): IncomingResponse {
+        if (base == null) routes.prepare()
         val order = (listOfNotNull(base) + routes.candidates()).distinct()
         if (base != null || order.size < 2) return postAnywhere(path, body)
         val winner = CompletableDeferred<Pair<String, IncomingResponse>>()
@@ -184,6 +187,7 @@ class BurrowChannel(
     }
 
     private suspend fun postAnywhere(path: String, body: OutgoingBody): IncomingResponse {
+        if (base == null) routes.prepare()
         val tried = mutableListOf<String>()
         val order = (listOfNotNull(base) + routes.candidates()).distinct()
         var last: Exception? = null

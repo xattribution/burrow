@@ -128,6 +128,8 @@ Burrow listens on two ports, both HTTPS only:
 
 Everything else answers 404 on 47824: the web UI, the API, sign-in, setup, MCP and the health check. The phone app's requests all go to one path, `/api/d`, sealed end to end (see [How the phone connects](#how-the-phone-connects)). **Settings → Public port** can add the web UI or MCP to it, and both are off by default.
 
+No reverse proxy? The phone app doesn't need one: see [Reach from anywhere](#reach-from-anywhere). Share links for people without the app still need the public port.
+
 Nothing travels in plain text on any hop. Burrow terminates TLS 1.3 itself, preferring the hybrid post-quantum key exchange (X25519MLKEM768), so the hop from the proxy to Burrow is encrypted too. Plain HTTP on either port only ever gets a redirect to HTTPS (or, from a proxy, an error), never content. Pick one of these two Nginx Proxy Manager setups.
 
 ### Option A: proxy host (recommended)
@@ -204,6 +206,18 @@ What it does:
 - **Nothing to steal:** no password or reusable token ever crosses the network. A server that isn't your Burrow can't complete the handshake, so the app won't talk to it, even on a Wi-Fi network that copies your home address.
 - **Removal:** paired phones are listed under **Settings → Phones** (and per user under **Users**). Removing one cuts it off at once; resetting a user's password removes their phones too.
 - **On the phone:** the key is sealed by the Android Keystore and excluded from backups and phone-to-phone transfers. A new phone is paired again.
+
+### Reach from anywhere
+
+Phones can reach Burrow away from home with no port forwarded on your router and no reverse proxy. Turn on **Settings → Reach from anywhere**. Burrow then runs a small [tethersys](https://github.com/xattribution/tethersys) bridge next to itself (it ships in the Docker image), and each paired phone joins it in the background the next time it connects.
+
+- **The way in:** the phone connects straight to Burrow when the two networks allow it (hole punching). Otherwise it goes through a public relay that only ever sees encrypted bytes. The app tries Burrow's own addresses first and uses the bridge when they don't answer.
+- **What it reaches:** only what the public port serves, which is the phone channel and share links. The channel inside is end-to-end encrypted and certificate-pinned exactly as above, so the bridge and any relay see no names, paths or contents.
+- **Who gets in:** only phones paired with this Burrow. Each one gets a one-use invite through its own encrypted channel. Removing a phone, or its user, removes it from the bridge too.
+- **Someone else's Burrow:** a Burrow you paired with in **Connections** is reached the same way when its admin has this turned on.
+- **Faster direct paths (optional):** set `BURROW_TETHER_PORT` to a fixed UDP port and forward that one UDP port. Without it, hole punching still works on most networks.
+
+The bridge keeps its identity in `state/tether`. The app shows how it's connected under **Settings**: at home, from outside, or over tethersys (directly or through a relay).
 
 ### Checking a download
 
@@ -285,6 +299,8 @@ Everything you'd normally change is set in the app. Environment variables cover 
 | `BURROW_SCAN_HOURS` | `6` | Full rescan interval; live updates cover the time between |
 | `BURROW_WATCH` | `true` | Live updates through inotify |
 | `BURROW_TRUSTED_PROXIES` | loopback | Proxies allowed to set `X-Forwarded-For`; add your reverse proxy's address |
+| `BURROW_TETHER_PORT` | random | UDP port for the Reach from anywhere bridge, if you want to forward one |
+| `BURROW_TETHER_BIN` | found | Path to `burrow-tether` when it isn't on the `PATH` or next to `burrow` |
 
 Folders named `.zfs`, `@eaDir`, `#recycle`, `.Trash-*`, `$RECYCLE.BIN` and a few others are always hidden. You can edit that list under **Settings → Hidden names**.
 
@@ -330,6 +346,14 @@ The phone app is in `android/`: a Kotlin Multiplatform core (`shared`: the encry
 cd android
 ./gradlew :shared:jvmTest :app:testDebugUnitTest   # protocol, sync and UI tests, with screenshots
 ./gradlew :app:assembleDebug                       # app/build/outputs/apk/debug/app-debug.apk
+```
+
+Reach from anywhere needs Rust. The tests that use it are skipped without these builds:
+
+```bash
+(cd tether && cargo build --release)                                            # the bridge
+BURROW_TEST_TETHER_BIN=$PWD/tether/target/release/burrow-tether go test ./...
+ANDROID_NDK_HOME=/path/to/ndk android/tether/build.sh                           # the app's library (cargo-ndk)
 ```
 
 Pushing a `v*` tag builds the release APK, signed with the key stored in the repository's `release` environment, and attaches it to a GitHub release.

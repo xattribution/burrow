@@ -1156,6 +1156,9 @@ async function viewSettings(s, seq) {
         h('label', {}, h('input', { type: 'checkbox', name: 'pui', checked: st.public_ui }), 'Also serve the web UI and its API'),
         h('label', {}, h('input', { type: 'checkbox', name: 'pmcp', checked: st.public_mcp }), 'Also serve MCP (still needs an API token)')),
       f => api('/api/settings', { method: 'PUT', body: { public_ui: f.pui.checked, public_mcp: f.pmcp.checked } })),
+    section('Reach from anywhere', 'Paired phones reach Burrow away from home over tethersys, with no port forwarded on your router: directly when the two networks allow it, through an encrypted relay when they don\u2019t. It carries what the public port serves (the phone app and share links), still end-to-end encrypted, and only for phones paired here. Removing a phone cuts it off.',
+      [h('div', { class: 'checks' }, h('label', {}, h('input', { type: 'checkbox', name: 'tether', checked: st.tether }), 'Let paired phones reach Burrow without a port forward')), tetherStatus()],
+      f => api('/api/settings', { method: 'PUT', body: { tether: f.tether.checked } }).then(() => setTimeout(() => viewSettingsTether(), 1500))),
     section('Libraries', `Top-level folders inside ${st.data_dir}. Only checked folders can be searched, browsed or shared.`,
       h('div', { class: 'checks' }, st.roots.map(r => h('label', {}, h('input', { type: 'checkbox', name: 'root', value: r.name, checked: r.enabled }), r.name))),
       f => api('/api/settings', { method: 'PUT', body: { roots: [...f.querySelectorAll('input[name=root]:checked')].map(i => i.value) } })),
@@ -1249,7 +1252,7 @@ function devicesList(all, keep = () => true) {
     if (!ds.length) { put(box, h('p', { class: 'muted' }, 'No phones paired.')); return; }
     put(box, h('table', { class: 'files' }, h('tbody', {}, ds.map(d => h('tr', {},
       h('td', { class: 'name' }, h('span', {}, icon('phone'), h('span', { class: 'label' }, d.name)), h('span', { class: 'where' }, [d.model, d.app_version && 'app ' + d.app_version].filter(Boolean).join(', ') || d.platform)),
-      h('td', { class: 'muted' }, d.last_seen ? `${fmtWhen(d.last_seen)}, ${d.last_via === 'public' ? 'away' : 'at home'}` : 'Not yet', d.last_ip ? h('span', { class: 'where' }, d.last_ip) : null),
+      h('td', { class: 'muted' }, d.last_seen ? `${fmtWhen(d.last_seen)}, ${{ public: 'away', tether: 'over tethersys' }[d.last_via] || 'at home'}` : 'Not yet', d.last_ip && d.last_via !== 'tether' ? h('span', { class: 'where' }, d.last_ip) : null),
       h('td', { class: 'muted hide-s' }, 'Paired ' + fmtDate(d.created)),
       h('td', { class: 'r' }, h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
         const b = ev.currentTarget;
@@ -1487,6 +1490,23 @@ async function followJob(id, st) {
 }
 
 // ---------- connected NAS ----------
+let tetherLine = null;
+function tetherStatus() {
+  tetherLine = h('p', { class: 'muted' });
+  viewSettingsTether();
+  return tetherLine;
+}
+async function viewSettingsTether() {
+  if (!tetherLine) return;
+  let s;
+  try { s = await api('/api/tether'); } catch (x) { put(tetherLine, h('span', { class: 'err' }, x.message)); return; }
+  const phones = n => n === 1 ? '1 phone' : `${n} phones`;
+  put(tetherLine, !s.available ? h('span', { class: 'err' }, s.error)
+    : !s.on ? 'Off'
+    : !s.running ? h('span', { class: s.error ? 'err' : '' }, s.error ? 'Restarting: ' + s.error : 'Starting')
+    : [h('b', {}, s.online ? 'Reachable from anywhere' : 'On, looking for a relay'), ` · ${phones(s.devices)} · `, h('span', { class: 'mono' }, s.id.slice(0, 10))]);
+}
+
 function remotesEditor() {
   const list = h('div', { class: 'stack' });
   const load = async () => {
