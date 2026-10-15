@@ -52,12 +52,19 @@ import io.github.xattribution.burrow.ui.common.EmptyState
 import io.github.xattribution.burrow.ui.common.Load
 import io.github.xattribution.burrow.ui.common.friendly
 
-/** Pick a folder in any place, to copy or move something there. */
+/** Pick a folder in any place (or only the places [only] allows), to copy or move something there. */
 @Composable
-fun PlaceTargetPicker(title: String, confirm: String, onDismiss: () -> Unit, onPick: (place: String, dir: String) -> Unit) {
+fun PlaceTargetPicker(
+    title: String,
+    confirm: String,
+    onDismiss: () -> Unit,
+    start: String = Place.HOME,
+    only: (Place) -> Boolean = { true },
+    onPick: (place: String, dir: String) -> Unit,
+) {
     val g = LocalContext.current.graph
-    val places by g.places.list.collectAsState()
-    var place by remember { mutableStateOf(Place.HOME) }
+    val places = g.places.list.collectAsState().value.filter(only)
+    var place by remember { mutableStateOf(start) }
     var path by remember { mutableStateOf("") }
     var state by remember { mutableStateOf<Load<Listing>>(Load.Loading) }
     var reload by remember { mutableStateOf(0) }

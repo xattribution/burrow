@@ -2,6 +2,7 @@ package io.github.xattribution.burrow.ui.files
 
 import androidx.lifecycle.ViewModel
 import io.github.xattribution.burrow.data.BurrowFs
+import io.github.xattribution.burrow.data.NoPhoneAccessException
 import io.github.xattribution.burrow.data.PlaceFs
 import androidx.lifecycle.viewModelScope
 import io.github.xattribution.burrow.core.Entry
@@ -31,6 +32,16 @@ class FilesViewModel(val fs: PlaceFs) : ViewModel() {
     val grid = MutableStateFlow(false)
     val message = MutableStateFlow<String?>(null)
 
+    /** The phone's storage was opened before Burrow had access to all files. */
+    val needsAccess = MutableStateFlow(false)
+
+    /** Paths picked for an action on several at once; empty when not selecting. */
+    val picked = MutableStateFlow<Set<String>>(emptySet())
+
+    fun pick(path: String) {
+        picked.value = if (path in picked.value) picked.value - path else picked.value + path
+    }
+
     private var loadJob: Job? = null
     private var searchJob: Job? = null
 
@@ -39,6 +50,7 @@ class FilesViewModel(val fs: PlaceFs) : ViewModel() {
     }
 
     fun open(p: String) {
+        if (p != _path.value) picked.value = emptySet()
         _path.value = p
         refresh()
     }
@@ -56,7 +68,10 @@ class FilesViewModel(val fs: PlaceFs) : ViewModel() {
         _listing.value = Load.Loading
         loadJob = viewModelScope.launch {
             _listing.value = try {
+                needsAccess.value = false
                 val l = fs.ls(p)
+                // keep only picks that are still here
+                if (picked.value.isNotEmpty()) picked.value = picked.value intersect l.entries.map { it.path }.toSet()
                 if (p.isEmpty() && burrow != null) _favorites.value = runCatching { burrow.conn.use { it.favorites() } }.getOrDefault(emptyList())
                 // folders of mostly photos open as a grid
                 val media = l.entries.count { it.kind == "image" || it.kind == "video" }
@@ -65,6 +80,7 @@ class FilesViewModel(val fs: PlaceFs) : ViewModel() {
                 Load.Ready(l)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
+                if (e is NoPhoneAccessException) needsAccess.value = true
                 Load.Failed(friendly(e))
             }
         }
@@ -81,8 +97,8 @@ class FilesViewModel(val fs: PlaceFs) : ViewModel() {
             delay(250) // wait for typing to pause
             _results.value = Load.Loading
             _results.value = try {
-                val b = burrow ?: throw IllegalStateException("Search works on a Burrow; this place isn't indexed.")
-                Load.Ready(b.conn.use { it.search(q.trim(), root = _path.value.ifEmpty { null }) })
+                if (burrow != null) Load.Ready(burrow.conn.use { it.search(q.trim(), root = _path.value.ifEmpty { null }) })
+                else Load.Ready(SearchResult(fs.find(_path.value, q.trim())))
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 Load.Failed(friendly(e))

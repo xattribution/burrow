@@ -1,6 +1,10 @@
 package io.github.xattribution.burrow.data
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import android.util.Base64
 import io.github.xattribution.burrow.core.PairingLink
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,8 +33,15 @@ sealed interface Place {
     /** An SMB share reached from the phone. */
     data class Smb(override val id: String, override val name: String, val settings: SmbSettings) : Place
 
+    /** This phone's own storage, a memory card or a USB drive. */
+    data class Phone(override val id: String, override val name: String, val root: java.io.File, val removable: Boolean) : Place
+
+    /** A folder another app shares through the system's document picker (a cloud drive app, say). */
+    data class Folder(override val id: String, override val name: String, val tree: android.net.Uri) : Place
+
     companion object {
         const val HOME = "home"
+        const val PHONE = "phone"
     }
 }
 
@@ -38,16 +49,24 @@ sealed interface Place {
 private data class PlaceRecord(val id: String, val kind: String, val name: String, val sealed: String = "")
 
 /**
- * Connections added in the app. They stay on this phone: their keys and
- * passwords are sealed with the Android Keystore and never sent to this phone's
- * own Burrow, unless "Link to my NAS" hands one over on purpose.
+ * The places the Files tab shows: this phone's Burrow, the phone's own storage
+ * volumes, and connections added in the app. Connections stay on this phone:
+ * their keys and passwords are sealed with the Android Keystore and never sent
+ * to this phone's own Burrow, unless "Link to my NAS" hands one over on purpose.
  */
-class Places(private val app: Context, private val home: Connection, private val tether: Tether?, private val wrapper: (String) -> KeyWrapper) {
+class Places(
+    private val app: Context,
+    private val home: Connection,
+    private val tether: Tether?,
+    private val wrapper: (String) -> KeyWrapper,
+    private val phoneAccess: () -> Boolean = { PhoneAccess.granted(app) },
+) {
     private val prefs = app.getSharedPreferences("places", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
     private val sealer by lazy { wrapper("burrow-places") }
     // one Connection per paired Burrow for the life of the app, kept across reloads
     private val peers = mutableMapOf<String, Place.Peer>()
+    private var volumes = phoneVolumes(app)
     private val _list = MutableStateFlow(load())
     val list: StateFlow<List<Place>> = _list
     private val fs = mutableMapOf<String, PlaceFs>()
@@ -60,7 +79,29 @@ class Places(private val app: Context, private val home: Connection, private val
         _list.value = load()
     }
 
-    private fun load(): List<Place> = listOf<Place>(Place.Home("Burrow")) + records().mapNotNull { r ->
+    init {
+        // memory cards and USB drives come and go
+        val f = IntentFilter().apply {
+            listOf(Intent.ACTION_MEDIA_MOUNTED, Intent.ACTION_MEDIA_UNMOUNTED, Intent.ACTION_MEDIA_REMOVED, Intent.ACTION_MEDIA_EJECT, Intent.ACTION_MEDIA_BAD_REMOVAL).forEach(::addAction)
+            addDataScheme("file")
+        }
+        runCatching {
+            ContextCompat.registerReceiver(app, object : BroadcastReceiver() {
+                override fun onReceive(c: Context, i: Intent) = refreshVolumes()
+            }, f, ContextCompat.RECEIVER_NOT_EXPORTED)
+        }
+    }
+
+    /** Reads the mounted volumes again. */
+    fun refreshVolumes() {
+        val now = phoneVolumes(app)
+        if (now == volumes) return
+        volumes = now
+        synchronized(fs) { fs.keys.filter { it == Place.PHONE || it.startsWith("vol-") }.forEach { fs.remove(it) } }
+        _list.value = load()
+    }
+
+    private fun load(): List<Place> = listOf<Place>(Place.Home("Burrow")) + volumes.map { Place.Phone(it.id, it.name, it.root, it.removable) } + records().mapNotNull { r ->
         when (r.kind) {
             "burrow" -> peers[r.id]?.copy(name = r.name) ?: run {
                 val store = DeviceStore(app, wrapper("burrow-peer-${r.id}"), "peer-${r.id}")
@@ -70,6 +111,7 @@ class Places(private val app: Context, private val home: Connection, private val
                 val plain = sealer.unwrap(Base64.decode(r.sealed, Base64.NO_WRAP))
                 Place.Smb(r.id, r.name, json.decodeFromString(SmbSettings.serializer(), plain.decodeToString()))
             }.getOrNull()
+            "folder" -> Place.Folder(r.id, r.name, android.net.Uri.parse(r.sealed))
             else -> null
         }
     }
@@ -82,6 +124,8 @@ class Places(private val app: Context, private val home: Connection, private val
             when (val p = get(id)) {
                 is Place.Peer -> BurrowFs(p.id, p.conn)
                 is Place.Smb -> SmbFs(p.id, p.settings)
+                is Place.Phone -> PhoneFs(p.id, p.root, phoneAccess)
+                is Place.Folder -> DocFs(p.id, app, p.tree)
                 else -> BurrowFs(Place.HOME, home)
             }
         }
@@ -126,6 +170,14 @@ class Places(private val app: Context, private val home: Connection, private val
         return get(id) as Place.Smb
     }
 
+    /** Adds a folder picked with the system's document picker; the grant is already persisted. */
+    fun addFolder(tree: android.net.Uri): Place.Folder {
+        records().firstOrNull { it.kind == "folder" && it.sealed == tree.toString() }?.let { return get(it.id) as Place.Folder }
+        val id = newId()
+        saveRecords(records() + PlaceRecord(id, "folder", unique(DocFs.nameOf(app, tree)), tree.toString()))
+        return get(id) as Place.Folder
+    }
+
     /**
      * "Link to my NAS": hands a connection to this phone's own Burrow, which then
      * reaches it itself as a library (Settings, Connected NAS there). An SMB share
@@ -154,6 +206,7 @@ class Places(private val app: Context, private val home: Connection, private val
                     }
                 }
             }
+            is Place.Phone, is Place.Folder -> throw IllegalStateException("Only another Burrow or an SMB share can be linked to your NAS.")
             else -> throw IllegalStateException("That's already your Burrow.")
         }
         var last: Exception? = null
@@ -173,11 +226,15 @@ class Places(private val app: Context, private val home: Connection, private val
     suspend fun remove(id: String) {
         val p = get(id) ?: return
         synchronized(fs) { fs.remove(id)?.close() }
+        if (p is Place.Phone) return
         if (p is Place.Peer) {
             runCatching { p.conn.unpair() }
             p.store.clear()
             peers.remove(id)
             app.deleteSharedPreferences("peer-$id")
+        }
+        if (p is Place.Folder) {
+            runCatching { app.contentResolver.releasePersistableUriPermission(p.tree, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
         }
         saveRecords(records().filter { it.id != id })
     }

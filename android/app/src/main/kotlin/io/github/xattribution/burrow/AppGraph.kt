@@ -21,12 +21,12 @@ import io.github.xattribution.burrow.work.Transfers
 import okio.Path.Companion.toOkioPath
 
 /** The app's long-lived pieces, made once per process. */
-class AppGraph(val app: Application, keyWrapper: (String) -> KeyWrapper) {
+class AppGraph(val app: Application, keyWrapper: (String) -> KeyWrapper, val phoneAccess: () -> Boolean) {
     val db: BurrowDb by lazy { BurrowDb(AndroidSqliteDriver(BurrowDb.Schema, app, "burrow.db")) }
     val device = DeviceStore(app, keyWrapper("burrow-device-key"))
     val tether = Tether(app.filesDir.resolve("tether"), { device.current?.info?.deviceName?.ifBlank { null } ?: Build.MODEL })
     val connection = Connection(app, device, tether)
-    val places = Places(app, connection, tether, keyWrapper)
+    val places = Places(app, connection, tether, keyWrapper, phoneAccess)
     val notifications = Notifications(app)
     val scheduler = SyncScheduler(app) { db }
     val transfers = Transfers(app) { db }

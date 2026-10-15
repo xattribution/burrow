@@ -79,6 +79,7 @@ import androidx.compose.ui.window.DialogProperties
 import io.github.xattribution.burrow.core.SyncMode
 import io.github.xattribution.burrow.core.db.Pair as PairRow
 import io.github.xattribution.burrow.data.MediaTree
+import io.github.xattribution.burrow.data.Place
 import io.github.xattribution.burrow.graph
 import io.github.xattribution.burrow.ui.common.BurrowFolderPicker
 import io.github.xattribution.burrow.ui.common.EmptyState
@@ -312,6 +313,30 @@ private fun AddPairDialog(onDone: (Long?) -> Unit) {
         } else permError = "To back up every photo, allow Burrow access to all photos and videos (not just selected ones)."
     }
     val askNotify = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    // any folder on the phone (Downloads, the top of a memory card) needs All files access;
+    // without it, Android's own folder picker is the way, and it refuses a few folders
+    var pickingPhone by rememberSaveable { mutableStateOf(false) }
+    val askFiles = io.github.xattribution.burrow.ui.files.rememberPhoneAccessRequest { ok -> if (ok) pickingPhone = true else treePicker.launch(null) }
+    if (pickingPhone) {
+        io.github.xattribution.burrow.ui.files.PlaceTargetPicker(
+            title = "Which folder on the phone?",
+            confirm = "Use this folder",
+            start = Place.PHONE,
+            only = { it is Place.Phone },
+            onDismiss = { pickingPhone = false },
+        ) { placeId, dir ->
+            pickingPhone = false
+            val vol = g.places.get(placeId) as? Place.Phone
+            if (vol != null) {
+                val f = if (dir.isEmpty()) vol.root else java.io.File(vol.root, dir)
+                localUri = Uri.fromFile(f).toString()
+                localLabel = if (dir.isEmpty()) vol.name else dir.substringAfterLast('/')
+                name = localLabel
+                step = 1
+            }
+        }
+        return
+    }
 
     if (step == 2) {
         Dialog(onDismissRequest = { step = if (photos) 0 else 1 }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -336,7 +361,9 @@ private fun AddPairDialog(onDone: (Long?) -> Unit) {
                         0 -> {
                             Text("What on this phone?", style = MaterialTheme.typography.titleLarge)
                             Choice(Icons.Outlined.PhotoLibrary, "Photos and videos", "Every photo and video on the phone, backed up as they're taken. Locations in photos are kept.") { askMedia.launch(mediaPerms) }
-                            Choice(Icons.Outlined.Folder, "A folder", "Any folder on the phone or its memory card: back it up, sync it both ways, or fill it from Burrow.") { treePicker.launch(null) }
+                            Choice(Icons.Outlined.Folder, "A folder", "Any folder on the phone, its memory card or a USB drive: back it up, sync it both ways, or fill it from Burrow.") {
+                                if (g.phoneAccess()) pickingPhone = true else askFiles()
+                            }
                             permError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         }
                         1 -> {

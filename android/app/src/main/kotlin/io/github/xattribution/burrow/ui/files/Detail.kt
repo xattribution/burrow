@@ -37,6 +37,8 @@ import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DriveFileRenameOutline
 import androidx.compose.material.icons.outlined.FileDownload
+import androidx.compose.material.icons.outlined.Share
+import io.github.xattribution.burrow.data.PhoneFs
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.MoreVert
@@ -194,10 +196,13 @@ fun DetailPane(
                     Facts(d)
                     FlowRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (d.canShare && home) Button(onClick = { sharing = true }) { Icon(Icons.Outlined.Link, null); Text("Share link", Modifier.padding(start = 8.dp)) }
-                        OutlinedButton(onClick = {
+                        if (fs !is PhoneFs) OutlinedButton(onClick = {
                             ctx.graph.transfers.download(path, d.entry.size, place)
                             scope.launch { snack.showSnackbar("Saving to Downloads/Burrow") }
                         }) { Icon(Icons.Outlined.FileDownload, null); Text("Save to phone", Modifier.padding(start = 8.dp)) }
+                        if (!d.entry.dir) OutlinedButton(onClick = {
+                            runCatching { sendFiles(ctx, place, listOf(d.entry)) }.onFailure { scope.launch { snack.showSnackbar(friendly(it)) } }
+                        }) { Icon(Icons.Outlined.Share, null); Text("Send", Modifier.padding(start = 8.dp)) }
                         OutlinedButton(enabled = opening == null, onClick = {
                             scope.launch {
                                 opening = 0f
@@ -287,7 +292,7 @@ fun DetailPane(
         AlertDialog(
             onDismissRequest = { deleting = false },
             title = { Text("Delete $name?") },
-            text = { Text(if (fs.isBurrow) "It goes to Burrow's trash and can be restored for 30 days." else "This share has no trash, so it's gone for good.") },
+            text = { Text(deleteNote(ctx.graph.places.get(place), many = false)) },
             confirmButton = {
                 TextButton(onClick = {
                     deleting = false

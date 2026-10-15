@@ -34,13 +34,20 @@ import java.util.concurrent.TimeUnit
 
 /**
  * One place the app can browse: the Burrow this phone is paired with, another
- * Burrow, or an SMB share. Paths are inside the place ("" is its top).
+ * Burrow, an SMB share, the phone's own storage or a folder from another app.
+ * Paths are inside the place ("" is its top).
  */
 interface PlaceFs {
     val id: String
 
     /** Burrow places have links, favorites, search and server thumbnails; an SMB share has files. */
     val isBurrow: Boolean
+
+    /** Whether [find] works here (a Burrow searches its own index instead). */
+    val canSearch: Boolean get() = false
+
+    /** Names under [under] containing every word of [query]. */
+    suspend fun find(under: String, query: String, limit: Int = 500): List<Entry> = throw UnsupportedOperationException("This place can't be searched.")
 
     suspend fun ls(path: String): Listing
     suspend fun stat(path: String): Entry

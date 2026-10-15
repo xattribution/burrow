@@ -12,6 +12,11 @@ class TestApp : BurrowApp() {
         super.onCreate()
     }
 
+    /** Robolectric can't answer the All files access check; tests flip this instead. */
+    var allFiles = false
+
+    override fun phoneAccess() = allFiles
+
     override fun keyWrapper(alias: String) = object : KeyWrapper {
         override fun wrap(plain: ByteArray) = plain.reversedArray()
         override fun unwrap(sealed: ByteArray) = sealed.reversedArray()

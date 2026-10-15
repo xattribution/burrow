@@ -18,6 +18,8 @@ import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.material.icons.outlined.PhoneAndroid
+import io.github.xattribution.burrow.ui.files.rememberPhoneAccessRequest
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.RestoreFromTrash
@@ -84,6 +86,12 @@ fun SettingsScreen(pairLink: String?, onLinkUsed: () -> Unit) {
     var addingPlace by remember { mutableStateOf(false) }
     val places by g.places.list.collectAsState()
     val tetherLinks by g.tether.links.collectAsState()
+    var phoneAccess by remember { mutableStateOf(g.phoneAccess()) }
+    val requestAccess = rememberPhoneAccessRequest { phoneAccess = it; if (it) g.places.refreshVolumes() }
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+        phoneAccess = g.phoneAccess()
+        onPauseOrDispose { }
+    }
     val p = paired ?: return
     val tetherLink = tetherLinks[p.info.tether]
     if (addingPlace) AddConnectionDialog(onDismiss = { addingPlace = false }, onAdded = { pl -> addingPlace = false; message = "Connected to ${pl.name}. Pick it at the top of Files." })
@@ -170,11 +178,20 @@ fun SettingsScreen(pairLink: String?, onLinkUsed: () -> Unit) {
                         TextButton(onClick = { addingPlace = true }) { Text("Add") }
                     }
                 }
-                val others = places.filter { it.id != Place.HOME }
+                val others = places.filter { it.id != Place.HOME && it !is Place.Phone }
                 if (others.isEmpty()) item {
                     Text("Other Burrows and SMB shares you add stay on this phone.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
                 }
                 items(others, key = { "p${it.id}" }) { pl -> ConnectionRow(pl, homeIsAdmin = p.info.admin) { message = it } }
+                item {
+                    ListItem(
+                        colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
+                        leadingContent = { Icon(Icons.Outlined.PhoneAndroid, null, tint = MaterialTheme.colorScheme.primary) },
+                        headlineContent = { Text("Files on this phone") },
+                        supportingContent = { Text(if (phoneAccess) "Every folder, memory cards and USB drives" else "Off") },
+                        trailingContent = if (phoneAccess) null else ({ TextButton(onClick = requestAccess) { Text("Allow") } }),
+                    )
+                }
                 if (transfers.isNotEmpty()) {
                     item { HorizontalDivider() }
                     item {
