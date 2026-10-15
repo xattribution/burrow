@@ -380,7 +380,8 @@ class UiTest {
     @Test
     fun aRemovedPhoneGoesBackToPairing() {
         pairAt(PHONE)
-        val id = Regex("\"id\":\"([0-9a-f]+)\"").find(server.web("GET", "/api/devices"))!!.groupValues[1]
+        // this pairing's own id: earlier tests left other phones on the same server
+        val id = ApplicationProvider.getApplicationContext<BurrowApp>().graph.device.current!!.info.deviceId
         server.web("DELETE", "/api/devices/$id")
         compose.onNodeWithText("DOCS").performClick()
         waitFor("Pair with Burrow")
