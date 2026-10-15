@@ -18,8 +18,9 @@ RUN apk add --no-cache musl-dev zig \
 WORKDIR /src
 COPY tether/Cargo.toml tether/Cargo.lock ./
 COPY tether/src ./src
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
+# a cache per architecture: the amd64 and arm64 builds run at once
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-$TARGETARCH \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-$TARGETARCH \
     --mount=type=cache,target=/src/target,id=tether-$TARGETARCH \
     T=$([ "$TARGETARCH" = arm64 ] && echo aarch64 || echo x86_64)-unknown-linux-musl \
  && rustup target add $T \
