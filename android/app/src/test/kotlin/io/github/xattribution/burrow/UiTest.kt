@@ -254,8 +254,10 @@ class UiTest {
             shot("unfolded-phone-picked")
             compose.onNodeWithContentDescription("Copy to").performClick()
             waitFor("Copy 2 items")
-            // DOCS in the picker, not the one in the list behind it
-            compose.onNode(hasText("DOCS") and androidx.compose.ui.test.hasAnyAncestor(androidx.compose.ui.test.isDialog()) and androidx.compose.ui.test.hasClickAction()).performClick()
+            // DOCS in the picker (once its list has loaded), not the one in the list behind it
+            val docsInPicker = hasText("DOCS") and androidx.compose.ui.test.hasAnyAncestor(androidx.compose.ui.test.isDialog()) and androidx.compose.ui.test.hasClickAction()
+            compose.waitUntil(30_000) { compose.onAllNodes(docsInPicker).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNode(docsInPicker).performClick()
             waitFor("Into DOCS")
             compose.onNodeWithText("Copy here").performClick()
             runBlocking { androidx.work.testing.TestListenableWorkerBuilder<io.github.xattribution.burrow.work.TransferWorker>(app).build().doWork() }
