@@ -12,7 +12,6 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -451,7 +450,6 @@ func qrPNG(text string, size int) ([]byte, error) {
 var shareTmpl = template.Must(template.New("").Funcs(template.FuncMap{
 	"size":  humanSize,
 	"date":  func(t int64) string { return time.Unix(t, 0).Format("Jan 2, 2006 15:04") },
-	"q":     url.QueryEscape,
 	"join":  func(a, b string) string { return strings.TrimPrefix(a+"/"+b, "/") },
 	"kindv": func(k string) bool { return k == "image" || k == "video" || k == "audio" },
 }).ParseFS(webFS, "web/share.html"))
