@@ -57,7 +57,7 @@
   <header class="head">
     {{if .Crumbs}}
     <nav class="crumbs" aria-label="Folder">
-      {{range $i, $c := .Crumbs}}{{if $i}}<span class="sep">/</span>{{end}}<a href="/s/{{$.S.ID}}{{if $c.Sub}}?p={{q $c.Sub}}{{end}}">{{$c.Name}}</a>{{end}}
+      {{range $i, $c := .Crumbs}}{{if $i}}<span class="sep">/</span>{{end}}<a href="/s/{{$.S.ID}}{{if $c.Sub}}?p={{$c.Sub}}{{end}}">{{$c.Name}}</a>{{end}}
     </nav>
     {{end}}
     <h1>{{if .File}}{{.File.Name}}{{else}}{{.Title}}{{end}}</h1>
@@ -66,36 +66,37 @@
   {{if .File}}
     {{$p := .Sub}}
     <div class="preview">
-      {{if eq .Preview "image"}}<img src="/s/{{.S.ID}}/raw{{if $p}}?p={{q $p}}{{end}}" alt="{{.File.Name}}">
-      {{else if eq .Preview "video"}}<video src="/s/{{.S.ID}}/raw{{if $p}}?p={{q $p}}{{end}}" controls preload="metadata" playsinline></video>
-      {{else if eq .Preview "audio"}}<audio src="/s/{{.S.ID}}/raw{{if $p}}?p={{q $p}}{{end}}" controls preload="metadata"></audio>
-      {{else if eq .Preview "pdf"}}<iframe src="/s/{{.S.ID}}/raw{{if $p}}?p={{q $p}}{{end}}" title="{{.File.Name}}"></iframe>
+      {{if eq .Preview "image"}}<img src="/s/{{.S.ID}}/raw{{if $p}}?p={{$p}}{{end}}" alt="{{.File.Name}}">
+      {{else if eq .Preview "video"}}<video src="/s/{{.S.ID}}/raw{{if $p}}?p={{$p}}{{end}}" controls preload="metadata" playsinline></video>
+      {{else if eq .Preview "audio"}}<audio src="/s/{{.S.ID}}/raw{{if $p}}?p={{$p}}{{end}}" controls preload="metadata"></audio>
+      {{else if eq .Preview "pdf"}}<iframe src="/s/{{.S.ID}}/raw{{if $p}}?p={{$p}}{{end}}" title="{{.File.Name}}"></iframe>
       {{end}}
     </div>
     <p class="actions">
-      <a class="btn primary" href="/s/{{.S.ID}}/dl{{if $p}}?p={{q $p}}{{end}}">Download ({{size .File.Size}})</a>
+      <a class="btn primary" href="/s/{{.S.ID}}/dl{{if $p}}?p={{$p}}{{end}}">Download ({{size .File.Size}})</a>
       <span class="muted">Modified {{date .File.Mtime}}</span>
     </p>
   {{else}}
     <p class="actions">
-      <a class="btn primary" href="/s/{{.S.ID}}/zip{{if .Sub}}?p={{q .Sub}}{{end}}">Download all (.zip)</a>
+      <a class="btn primary" href="/s/{{.S.ID}}/zip{{if .Sub}}?p={{.Sub}}{{end}}">Download all (.zip)</a>
       <span class="muted">{{len .Entries}} item{{if ne (len .Entries) 1}}s{{end}}</span>
     </p>
     <table class="list">
-      <thead><tr><th>Name</th><th class="r">Size</th><th class="r hide-s">Modified</th></tr></thead>
+      <thead><tr><th>Name</th><th class="r">Size</th><th class="r hide-s">Modified</th><th class="dl"><span class="sr">Download</span></th></tr></thead>
       <tbody>
       {{range .Entries}}
         {{$sub := join $.Sub .Name}}
         <tr>
           <td class="name">
-            {{if .IsDir}}<a href="/s/{{$.S.ID}}?p={{q $sub}}"><svg class="icon k-folder" viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>{{.Name}}</a>
-            {{else}}<a href="/s/{{$.S.ID}}?p={{q $sub}}">{{if eq .Kind "image"}}<img class="th" loading="lazy" src="/s/{{$.S.ID}}/thumb?p={{q $sub}}" alt="">{{else}}<svg class="icon" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>{{end}}{{.Name}}</a>{{end}}
+            {{if .IsDir}}<a href="/s/{{$.S.ID}}?p={{$sub}}"><svg class="icon k-folder" viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>{{.Name}}</a>
+            {{else}}<a href="/s/{{$.S.ID}}?p={{$sub}}">{{if eq .Kind "image"}}<img class="th" loading="lazy" src="/s/{{$.S.ID}}/thumb?p={{$sub}}" alt="">{{else}}<svg class="icon" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>{{end}}{{.Name}}</a>{{end}}
           </td>
           <td class="r num">{{if not .IsDir}}{{size .Size}}{{end}}</td>
           <td class="r num hide-s">{{date .Mtime}}</td>
+          <td class="dl">{{if .IsDir}}<a class="get" href="/s/{{$.S.ID}}/zip?p={{$sub}}" title="Download {{.Name}} (.zip)" aria-label="Download {{.Name}} as a zip">{{else}}<a class="get" href="/s/{{$.S.ID}}/dl?p={{$sub}}" title="Download {{.Name}}" aria-label="Download {{.Name}}">{{end}}<svg class="icon" viewBox="0 0 24 24"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg></a></td>
         </tr>
       {{else}}
-        <tr><td colspan="3" class="muted">This folder is empty.</td></tr>
+        <tr><td colspan="4" class="muted">This folder is empty.</td></tr>
       {{end}}
       </tbody>
     </table>

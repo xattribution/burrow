@@ -32,3 +32,7 @@
 @media (max-width: 560px) { .hide-s { display: none; } .share { padding-top: 20px; } }
 .up-h { font-size: 17px; margin: 28px 0 10px; }
 .k-folder { color: var(--accent); fill: var(--accent); } /* ledger: filled folder in the accent, same as the app */
+.list .dl { inline-size: 44px; padding: 0; text-align: center; }
+.list .get { display: inline-grid; place-items: center; inline-size: 40px; block-size: 36px; color: var(--ink-2); }
+.list .get:hover, .list .get:focus-visible { background: var(--accent); color: var(--on-accent); }
+.sr { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
