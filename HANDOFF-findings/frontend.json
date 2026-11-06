@@ -1,0 +1,218 @@
+[
+ {
+  "file": "web/app.js",
+  "line": 532,
+  "title": "'Pick a date' with an empty date field silently creates or edits a link to NEVER expire",
+  "kind": "bug",
+  "severity": "P1",
+  "fix": "In expiryControl: (1) change the line-532 change listener to also toggle required: `sel.addEventListener('change', () => { date.hidden = sel.value !== 'date'; date.required = sel.value === 'date'; });` \u2014 all four callers (newLinkForm ~561, openFolderPanel ~681, openDropPanel ~765, share edit ~719) submit via real <form> submit buttons, so the browser then blocks submit with 'Please fill out this field'. (2) Harden read() (line 533-535) so it can never emit -1 from an empty date: `if (sel.value === 'date') { const t = Date.parse(date.value); if (!t) { date.reportValidity(); throw new Error('Pick a date and time for the expiry.'); } return { expires_at: Math.floor(t / 1000) }; }`. (3) In openSharePanel's submit handler, move the `if (sel !== 'keep') Object.assign(body, exp.read());` line (~719) inside the existing try so a thrown read() lands in editErr instead of an unhandled rejection.",
+  "notes": "Verified: app.js:533-534 returns { expires_hours: -1 } when Date.parse('')=NaN; server treats hours<0 as never (shares.go:283-289 leaves exp=0 on create; shares.go:348-350 sets expires=0 on PATCH). A user who explicitly picked a date to RESTRICT a link gets an immortal public link with no warning, in all four expiry forms. Two duplicate findings merged."
+ },
+ {
+  "file": "web/app.js",
+  "line": 1119,
+  "title": "API-token Delete and 'Turn off two-factor' fire on a single un-confirmed click, unlike every other destructive button",
+  "kind": "ux",
+  "severity": "P1",
+  "fix": "Apply the app's existing two-click dataset.armed pattern (as at app.js:737-741, 978-981, 1257-1260, 1519-1522, 1637-1640). Token delete (line 1119): `onclick: async ev => { const b = ev.currentTarget; if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = `Delete \u201c${t.name}\u201d`; return; } await api('/api/tokens/' + t.id, { method: 'DELETE' }); closePanel(false); reload(); }`. 2FA reset (lines 975-977): change the handler to `async ev => { const b = ev.currentTarget; if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really turn off two-factor'; return; } try { await api('/api/users/' + u.id, { method: 'PATCH', body: { reset_2fa: true } }); openUserPanel(id); viewUsers(getState(), routeSeq); } catch (x) { actErr.textContent = x.message; } }`.",
+  "notes": "Verified: app.js:1119 deletes on first click; the token secret is shown only once (app.js:1098), so a misclick irrevocably severs every MCP client using it. app.js:975-977 strips a user's 2FA on one click. Every other danger button in the file arms first. Two duplicate findings merged."
+ },
+ {
+  "file": "web/app.js",
+  "line": 138,
+  "title": "boot() and the login submit have no error path: a failed /api/state or /api/login fetch leaves a permanently blank white page or a dead Sign-in button",
+  "kind": "error-handling",
+  "severity": "P2",
+  "fix": "Wrap boot's body (app.js:137-144): `async function boot() { let st; try { const r = await fetch('/api/state'); st = await r.json(); } catch { gate(h('form', {}, h('h1', {}, h('img', { src: '/favicon.svg', alt: '' }), 'Burrow'), h('p', { class: 'err', role: 'alert' }, 'Can\u2019t reach the server. Check Burrow and your network.'), h('button', { class: 'btn primary', type: 'button', onclick: () => boot() }, 'Retry'))); return; } ME = st; ... }`. In loginScreen's submit handler (app.js:165-166), wrap the fetch+json in try/catch and on failure set `err.textContent = 'Can\u2019t reach Burrow \u2014 check your connection.'; return;`.",
+  "notes": "Verified: index.html ships only an empty <div id=\"app\">; boot() is called unguarded at module level (1244), from login success (167), setup (207), sign-out (1191), and every 401 inside api() (75) \u2014 a reverse-proxy 502 (non-JSON body makes r.json() reject) mid-session yields a blank page with no retry. Two duplicate findings merged."
+ },
+ {
+  "file": "web/app.js",
+  "line": 529,
+  "title": "Admin default expiry 0 ('never') is ignored: new-link dialogs preselect '7 days' instead of 'Never'",
+  "kind": "bug",
+  "severity": "P2",
+  "fix": "In expiryControl change line 529 to: `const def = defHours === 0 ? '-1' : String(defHours || 168);`. Line 530's fallback keeps handling non-preset positive values. One line.",
+  "notes": "Verified: `String(defHours || 168)` turns 0 into '168', which IS in opts, so the `defHours > 0 ? '168' : '-1'` fallback is unreachable for 0. Settings UI documents 0 as never (app.js:1172), and the server only honors it when the client sends expires_hours 0 (shares.go:285-288) \u2014 but read() sends the selected 168, so every UI-created link silently expires in 7 days against the admin's configuration."
+ },
+ {
+  "file": "web/app.js",
+  "line": 643,
+  "title": "Shared-folder admin upload: errors are invisible (message wiped by re-render, server reason discarded) and a network failure leaves 'Uploading\u2026' stuck with a dead retry",
+  "kind": "error-handling",
+  "severity": "P2",
+  "fix": "Rewrite the change handler body (app.js:638-646): `fileIn.addEventListener('change', async () => { if (!fileIn.files.length) return; const fd = new FormData(); for (const f of fileIn.files) fd.append('files', f, f.name); status.className = 'muted'; status.textContent = `Uploading ${fileIn.files.length} file${fileIn.files.length === 1 ? '' : 's'}\u2026`; try { const r = await fetch(`/api/shares/${x.id}/upload`, { method: 'POST', headers: { 'X-Burrow': '1' }, body: fd }); if (r.ok) { changed(); } else { const d = await r.json().catch(() => ({})); status.textContent = d.error || `Upload failed (${r.status})`; status.className = 'err'; } } catch { status.textContent = 'Upload failed \u2014 connection lost'; status.className = 'err'; } finally { fileIn.value = ''; } });` \u2014 call changed() only on success, because changed() rebuilds the whole panel (openSharePanel \u2192 panelShell replaceChildren) and would wipe the error the instant it is set.",
+  "notes": "Verified: current code sets 'Upload failed' then immediately calls changed(), which replaces the panel including the status node; the server's specific reason (collections.go:445 httpErr with err.Error(), e.g. 403 admins-only or 507 out-of-space) is never read; a rejected fetch is uncaught so 'Uploading\u2026' sticks forever; fileIn.value is never reset so re-picking the same file fires no change event (the main uploader resets it at app.js:1314 for exactly this reason). Two duplicate findings merged."
+ },
+ {
+  "file": "web/app.js",
+  "line": 558,
+  "title": "Create forms never disable their submit button: a double click or double Enter mints two live share links (or drops/folders/users)",
+  "kind": "ux",
+  "severity": "P2",
+  "fix": "In the four create submit handlers \u2014 newLinkForm (app.js:558), openFolderPanel (678), openDropPanel (762), openUserPanel create (952) \u2014 guard and disable: first lines `const b = f.querySelector('button[type=submit]'); if (b.disabled) return; b.disabled = true;` and wrap the existing body so a `finally { b.disabled = false; }` re-enables it. This is the exact pattern the remotes form already uses (app.js:1555-1558). base.css:91 already styles .btn[disabled].",
+  "notes": "Verified: none of the four handlers disables the button while the POST is in flight; each extra POST /api/shares creates a separate ACTIVE link (shares.go createShare) that the user never sees, since the panel navigates to the first response's id."
+ },
+ {
+  "file": "web/app.js",
+  "line": 824,
+  "title": "Overview 'Rescan now' throws: e.currentTarget is null after await, so the confirmation never appears",
+  "kind": "bug",
+  "severity": "P2",
+  "fix": "Capture the element before awaiting, like every other handler in the file (e.g. app.js:1606): `onclick: async e => { const b = e.currentTarget; b.disabled = true; await api('/api/rescan', { method: 'POST' }); b.textContent = 'Rescan started'; }` at app.js:824.",
+  "notes": "Verified: event.currentTarget is reset to null once dispatch completes, which happens at the first await; the POST succeeds (api.go routes POST /api/rescan) but the assignment throws an unhandled TypeError, the label never changes, and the still-enabled button invites repeated rescans. Two duplicate findings merged."
+ },
+ {
+  "file": "web/app.js",
+  "line": 410,
+  "title": "Escape while typing in a panel form closes the panel and destroys everything typed",
+  "kind": "ux",
+  "severity": "P2",
+  "fix": "In the global keydown handler (app.js:410-414), check `typing` before the panel branch: `if (e.key === 'Escape') { if (typing) { document.activeElement.blur(); return; } if (!$('#panel')?.hidden) { closePanel(); return; } return; }` \u2014 first Escape leaves the field, a second Escape closes the panel.",
+  "notes": "Verified: the panel-close branch runs before the typing check, and closePanel() (app.js:445-450) does p.replaceChildren(), wiping the DOM \u2014 so Escape focused in any panel form field (new user with grants rows, new shared folder, new link, share edit, token editor) silently discards all input. The only-blur intent is visible on the very next line (412)."
+ },
+ {
+  "file": "shares.go",
+  "line": 595,
+  "title": "Entering a share password loses the deep link: the visitor is always dumped at the share root",
+  "kind": "ux",
+  "severity": "P2",
+  "fix": "Carry p through the auth round trip: (1) in the two NeedPW renders (shares.go:588 and 599) set `Sub: cleanRel(r.URL.Query().Get(\"p\"))` \u2014 for the 588 wrong-password re-render use `cleanRel(r.FormValue(\"p\"))` since it is a POST; (2) in web/share.html add `{{if .Sub}}<input type=\"hidden\" name=\"p\" value=\"{{.Sub}}\">{{end}}` inside the .pw form (after line 39); (3) on success (shares.go:595) build `dest := \"/s/\" + s.ID; if p := cleanRel(r.FormValue(\"p\")); p != \"\" { dest += \"?p=\" + url.QueryEscape(p) }` and redirect to dest (add net/url to imports if missing).",
+  "notes": "Verified: the password gate at shares.go:598-600 renders NeedPW without Sub, the form (share.html:37-42) carries no p, and success always redirects to \"/s/\"+s.ID \u2014 so a deep link to a specific file/subfolder in a protected folder share lands at the root after the password, and the visitor must re-find the file."
+ },
+ {
+  "file": "web/share.html",
+  "line": 92,
+  "title": "Public share page shows broken-image icons for HEIC/SVG/TIFF/RAW/PSD: it requests thumbnails the server can never make",
+  "kind": "bug",
+  "severity": "P2",
+  "fix": "Add a FuncMap entry in shares.go:450-455: `\"thumbable\": func(e Entry) bool { return !e.IsDir && thumbExts[e.Ext] },` and in web/share.html:92 change `{{if eq .Kind \"image\"}}` to `{{if thumbable .}}` so unsupported formats fall through to the existing generic file SVG.",
+  "notes": "Verified: Kind \"image\" covers 19 extensions (indexer.go kinds map: tif, tiff, heic, heif, svg, avif, raw, cr2, cr3, nef, arw, dng, psd...) but serveThumb supports only six (thumbs.go:30 thumbExts) and answers http.NotFound otherwise (thumbs.go:36-38). The logged-in app already guards this exact case (app.js:363). A shared folder of iPhone HEIC photos looks broken only on the public page."
+ },
+ {
+  "file": "web/share.js",
+  "line": 51,
+  "title": "Drop-page upload failures always say 'failed, try again', discarding the server's reason \u2014 even when the link is dead and retry can never work",
+  "kind": "error-handling",
+  "severity": "P2",
+  "fix": "Resolve the XHR itself instead of a boolean: change line 51 to `x.onload = () => res(x);` and line 52 to `x.onerror = () => res(null);`, then after the await: `const good = x && x.status === 200; let msg = 'failed, try again'; if (x && !good) { try { msg = JSON.parse(x.responseText).error || msg; } catch { if (x.status === 410 || x.status === 404) msg = 'this link no longer works'; } }` and set `f._size.textContent = good ? 'sent' : msg;` (keep the existing className lines, which already use good).",
+  "notes": "Verified: the server sends specific JSON reasons via httpErr (handleDrop \u2192 uploadErrCode: 507 'the server is almost out of space; try again later', 400 validation) and a dead link returns the HTML 410 state page from handleShare:558-560; share.js:51/56 throws all of it away, so visitors keep retrying an out-of-space or revoked drop."
+ },
+ {
+  "file": "web/share.html",
+  "line": 72,
+  "title": "Shared text/markdown/code files render a blank preview: previewKind returns \"text\" but the template has no text branch",
+  "kind": "bug",
+  "severity": "P2",
+  "fix": "Add one branch after the pdf line in web/share.html (line 72): `{{else if eq .Preview \"text\"}}<iframe src=\"/s/{{.S.ID}}/raw{{if $p}}?p={{$p}}{{end}}\" title=\"{{.File.Name}}\"></iframe>` \u2014 the existing `.preview iframe` rule (share.css:10) already sizes it, and safeContentType (shares.go) already serves these as sandboxed text/plain.",
+  "notes": "Verified: shares.go:784-786 classifies small code/txt/md/csv/log files as Preview \"text\", but share.html:69-73 only branches on image/video/audio/pdf, so a shared README.md shows an empty <div class=\"preview\"> and forces a download. The raw fetch goes through the same gateDownload path the existing image/video previews use, so limit semantics are unchanged."
+ },
+ {
+  "file": "api.go",
+  "line": 453,
+  "title": "Asset cache-busting (?v=) is dead code: browsers run a stale app.js for up to 5 minutes after every upgrade and revalidate all assets every 5 minutes",
+  "kind": "caching",
+  "severity": "P2",
+  "fix": "Version the URLs at serve time. In handleIndex (api.go:453-463), after reading index.html: `for _, n := range []string{\"base.css\", \"app.css\", \"app.js\"} { b = bytes.ReplaceAll(b, []byte(\"/assets/\"+n+\"\\\"\"), []byte(\"/assets/\"+n+\"?v=\"+version+\"\\\"\")) }` (version is main.go:25; add bytes to imports). For share.html (a Go template), add a FuncMap entry `\"v\": func() string { return version }` in shares.go:450 and change its three asset refs (lines 9, 10, 120) to e.g. `/assets/base.css?v={{v}}`. The existing immutable branch in handleAsset (api.go:477-481) then activates with no other changes.",
+  "notes": "Verified: handleAsset already serves `public, max-age=31536000, immutable` when ?v= is present and max-age=300 otherwise, but index.html:8-10 and share.html:9-10,120 link assets bare, so after an upgrade a browser whose 300s cache is fresh runs the OLD app.js against the NEW API (index.html itself is no-cache); ServeContent also uses process startTime as Last-Modified (api.go:465,484), turning every restart into full re-downloads. Caveat: in dev builds version is \"dev\" \u2014 acceptable, or append startTime.Unix() for uniqueness."
+ },
+ {
+  "file": "web/app.js",
+  "line": 285,
+  "title": "route() refetches everything on every navigation: each row selection or arrow keypress fires 3 redundant requests and a full table+sidebar rebuild, and the sidebar is double-fetched at startup and refetched per search keystroke",
+  "kind": "perf",
+  "severity": "P2",
+  "fix": "Three coordinated changes in route()/shell(): (1) delete the `loadNav();` call in shell() (app.js:244) \u2014 route() always runs right after boot and calls it; (2) in route(), gate loadNav on its inputs: module-level `let navKey = null;` then `const nk = s.view + '|' + s.path; if (nk !== navKey) { navKey = nk; loadNav(); }` (loadNav is still called explicitly where data changes: favBtn 482, settings save 1140, remotes 1522/1557); (3) short-circuit selection-only changes: module-level `let renderedKey = '';` and in route() after getState() compute `const key = [s.view, s.path, s.q, s.kind, s.sort, s.tab, s.within, s.add, s.user].join('\\u0000');` \u2014 if `key === renderedKey && $('#content').childElementCount` skip the try/catch view dispatch entirely and fall through to the panel block at line 308 (openPanelFor already syncs row aria-selected at 462); set `renderedKey = key` after a successful view render and reset it (`renderedKey = '';`) in every path that mutates the listing and relies on route()/nav() refetching: uploadFiles (before its final route(), 1364), moveInto (1474), deleteControl success (1611), renameControl success (1590), the trash Restore/Delete handlers (1635, 1640), and newFolderControl success (1570).",
+  "notes": "Verified: nav({sel}) on every row click (375) and arrow key (399) runs route(), which unconditionally calls loadNav() (292: /api/ls?path= + /api/favorites) and re-awaits the full view fetch (viewBrowse 313 or viewSearch 426) before the highlight applies \u2014 3 HTTP requests and a full rebuild per keypress, lagging by a round trip on SMB/remote libraries (files.go:154-155 proxies listDir). shell()+route() at boot double-fetch the sidebar, and each search keystroke adds the two nav requests to /api/search. The reset list is essential: without it, delete/rename/upload/trash actions would stop refreshing the listing. Three overlapping findings merged."
+ },
+ {
+  "file": "web/app.js",
+  "line": 1340,
+  "title": "Uploads cannot be cancelled: the tray's X only hides progress while multi-GB transfers keep running, though a cancel endpoint exists",
+  "kind": "ux",
+  "severity": "P2",
+  "fix": "In uploadFiles (app.js:1330-1365): give each row a cancel flag and button \u2014 in the rows map add `const ctl = { aborted: false, ac: null };` and append `h('button', { class: 'iconbtn', 'aria-label': 'Cancel', onclick: () => { ctl.aborted = true; ctl.ac?.abort(); } }, icon('x'))` to the li; carry ctl in the returned object. In the transfer loop: before starting a row, `if (ctl.aborted) { st.textContent = 'Cancelled'; continue; }`; pass `signal: (ctl.ac = new AbortController()).signal` to the chunk PUT fetch (1347); in the inner catch, treat aborts as final: `if (x.name === 'AbortError' || ctl.aborted) throw Object.assign(new Error('Cancelled'), { final: true, cancelled: true, up });` before the retry logic. In the outer catch, when `x.cancelled` call `api('/api/uploads/' + (x.up?.id ?? up.id), { method: 'DELETE' }).catch(() => {})` and set st.textContent = 'Cancelled' without the err class.",
+  "notes": "Verified: uploadFiles has no AbortController; the tray Close (app.js:1322) removes the DOM while the 8 MB chunk loop keeps PUTting. The backend supports cancel: DELETE /api/uploads/{id} \u2192 apiUploadCancel (writes.go:1177) and refuses new uploads at 100 open ones ('finish or cancel some first', writes.go:885), so abandoned uploads also pile toward that cap."
+ },
+ {
+  "file": "web/app.js",
+  "line": 621,
+  "title": "Links, Users and Activity rows are mouse-only: no keyboard path exists to open a share's details or a user at all",
+  "kind": "a11y",
+  "severity": "P2",
+  "fix": "Wrap each row's first-cell label in a real anchor (same pattern as the file table's dir links, app.js:379). viewShares (line 622): `h('a', { class: 'label', href: '?view=shares&share=' + x.id, onclick: ev => { ev.preventDefault(); ev.stopPropagation(); nav({ share: x.id }, true); } }, x.label || x.path)` in place of the label span. viewUsers (877): same with href `'?view=users&user=' + u.id` and `nav({ user: String(u.id), tab: '' }, true)`. Link-activity rows (790): make the share id cell an anchor to `'?view=shares&share=' + e.share + '&tab=all'`. File-changes rows (810): wrap the name label in an anchor (only when c.kind !== 'deleted') navigating as the row onclick does. `.files .name a` styling already exists (app.css:55-56) and anchors are focusable + Enter-activatable natively; keep the tr onclick for pointer users.",
+  "notes": "Verified: these four tables set CURRENT = [] (613, 779, 871), so the global ArrowDown/Enter mechanism is dead there, and rows are bare tr onclick with no tabindex/anchor \u2014 the entire link-management and user-management flow is unreachable without a pointer (the only other route to a share panel is the Details anchor inside a file panel). Two duplicate findings merged; the anchor approach also gives middle-click/open-in-new-tab for free."
+ },
+ {
+  "file": "web/app.js",
+  "line": 497,
+  "title": "Moving a file is drag-and-drop only: impossible by keyboard and on phones, though the move API and progress plumbing already exist",
+  "kind": "ux",
+  "severity": "P2",
+  "fix": "Add a moveControl(e) alongside renameControl in the panel's can_change row (app.js:497), modeled on renameControl (1580-1601): a 'Move' button that swaps to an input with its own datalist (`const options = h('datalist', { id: 'move-options' })`, filled via the existing folderSuggest(options, q) with the same debounced oninput/onfocus wiring as grantsEditor 898-899) plus Move/Cancel buttons; on confirm call the existing moveInto(e.path, dest.value.trim()) (app.js:1465), which already handles jobs, the progress tray and errors, then `panelFor = ''; nav({ sel: '' }, true);`. Guard with canMove(e.path, dest) before calling. ~20 lines, no new API.",
+  "notes": "Verified: moveInto is called from exactly one place, the document drop handler (1432-1435), fed only by HTML5 drag \u2014 which Android Chrome never fires from touch and keyboards cannot drive. The panel offers Download/Open/Copy path/Favorite/Rename/Delete but no Move; renameControl cannot substitute (it rebuilds the path within the same parent, 1589). folderSuggest is reusable as-is (884-889)."
+ },
+ {
+  "file": "web/base.css",
+  "line": 27,
+  "title": "Light-mode links and the current breadcrumb fail WCAG AA contrast (~3.6:1 and ~3.3:1)",
+  "kind": "a11y",
+  "severity": "P2",
+  "fix": "Add a text-safe accent token: in :root (base.css:19-37) add `--accent-text: oklch(0.53 0.13 70);`; in BOTH dark blocks (inside `@media (prefers-color-scheme: dark) :root:not([data-theme=\"light\"])` at 38-54 and `:root[data-theme=\"dark\"]` at 55-69) add `--accent-text: oklch(0.84 0.14 82);` (same as dark --accent). Then change base.css:74 to `a { color: var(--accent-text); }` and app.css:24 to `.crumbs b { color: var(--accent-text); }`. Buttons, focus rings, folder icons and nav fills keep --accent.",
+  "notes": "Verified: --accent oklch(0.62 0.14 70) on --paper oklch(0.985...) computes to roughly 3.5:1, below the 4.5:1 AA threshold for the 15px/400 body text; .crumbs b sits on --surface and is worse. This hits every text link in light mode (Details, Folder fact, Download QR, Retry). Dark mode already passes (bright amber on black)."
+ },
+ {
+  "file": "web/app.js",
+  "line": 63,
+  "title": "info() tooltips: text never announced to screen readers, one Escape kills all tips for keyboard users until re-render, and taps on touch screens can't open them",
+  "kind": "a11y",
+  "severity": "P2",
+  "fix": "Rework info() (app.js:63-65): `let tipId = 0; function info(text) { const id = 'tip-' + (++tipId); return h('button', { type: 'button', class: 'info', 'aria-label': 'More about this', 'aria-describedby': id, onclick: e => { const b = e.currentTarget; if ('open' in b.dataset) delete b.dataset.open; else b.dataset.open = ''; } }, 'i', h('span', { class: 'tip', id, role: 'tooltip' }, text)); }` (aria-describedby text is computed even while visibility:hidden). Beside the pointerover listener (app.js:67) add `addEventListener('focusin', e => { const b = e.target.closest?.('.info'); if (b) delete b.dataset.dismissed; });` and extend the Escape handler (66) to also `delete b.dataset.open`. In app.css next to line 124 add `.info[data-open] .tip { visibility: visible; }` and `.info::after { content: \"\"; position: absolute; inset: -8px; }` for a 32px touch target on the 16px button.",
+  "notes": "Verified: app.css:123-125 keeps .tip visibility:hidden except on :hover/:focus-visible \u2014 a tap triggers neither (buttons don't match :focus-visible on pointer activation), so all ~20 help texts (expiry semantics, token Ask/On modes, grant precedence...) are unreachable on phones, which base.css's own design notes name as a target; the aria-label masks the content and no describedby exists; the global Escape handler (66) sets data-dismissed on every .info and only pointerover (67) clears it, so after one Escape keyboard focus can never reveal a tip again. Two duplicate findings merged."
+ },
+ {
+  "file": "web/app.js",
+  "line": 228,
+  "title": "Enter or ArrowDown in the search box during the 110ms debounce/fetch window acts on the PREVIOUS view's rows, opening an unrelated folder",
+  "kind": "bug",
+  "severity": "P2",
+  "fix": "In the search keydown handler (app.js:228-231), flush the pending navigation instead of acting on stale CURRENT (the debounce timer `t` is already in scope): `searchInput.addEventListener('keydown', e => { const v = searchInput.value.trim(); const s = getState(); const fresh = s.view === 'search' && s.q === v; if (e.key === 'Enter') { e.preventDefault(); if (v && !fresh) { clearTimeout(t); nav({ view: 'search', q: v, sel: '' }, s.view === 'search'); } else openSel(); } if (e.key === 'ArrowDown' && fresh) { e.preventDefault(); moveSel(1); } });`",
+  "notes": "Verified: the handler runs unconditionally while CURRENT is only replaced after the search response lands (viewSearch 438) and the nav itself is debounced 110ms (219-226); openSel falls back to CURRENT[0] (404), so typing a query and hitting Enter quickly opens the first entry of the folder you were browsing, then the pending debounce jumps to the results, leaving a junk history entry."
+ },
+ {
+  "file": "web/app.js",
+  "line": 475,
+  "title": "Text preview: an error body renders as the file's contents, a network failure shows 'Loading\u2026' forever, and the whole file (up to 2 MB) is downloaded to show 20 KB",
+  "kind": "error-handling",
+  "severity": "P3",
+  "fix": "Replace line 475's fetch chain: `fetch(raw, { headers: { Range: 'bytes=0-19999' } }).then(r => { if (!r.ok) throw new Error('Couldn\u2019t load the preview.'); return r.text(); }).then(t => pv.textContent = t.slice(0, 20000)).catch(x => { pv.textContent = x.message; pv.className = 'muted'; });` \u2014 /api/raw ends in http.ServeContent (which honors Range with 206), and a server that ignored Range would return 200 with the full body, which the existing slice still handles.",
+  "notes": "Verified: no r.ok check and no catch \u2014 a file deleted between /api/info and /api/raw shows the literal JSON error body as the file's text, and a rejected fetch leaves 'Loading\u2026' with an unhandled rejection; previewKind allows text files up to 2 MB while only 20 KB is shown. Three overlapping findings (two error-handling duplicates + the Range efficiency one) merged into one 3-line change."
+ },
+ {
+  "file": "web/app.js",
+  "line": 246,
+  "title": "Every boot()/shell() stacks another never-cleared 15s /api/status poller; stale ones keep polling after sign-out",
+  "kind": "bug",
+  "severity": "P3",
+  "fix": "Module-level `let footTimer = 0;` and in shell() replace line 246 with `clearInterval(footTimer); footTimer = setInterval(refreshFoot, 15000);`. Optionally add `if (document.hidden) return;` as refreshFoot's first line plus a visibilitychange listener that calls refreshFoot() when the tab becomes visible, so hidden tabs stop polling.",
+  "notes": "Verified: the interval id at app.js:246 is never stored; shell() runs on every successful boot, and boot() re-runs on sign-in (167), setup (207), sign-out (1191) and any 401 in api() (75) \u2014 N sign-in/out cycles leave N concurrent pollers, which keep hitting /api/status quietly from the login screen (refreshFoot's catch at 279 swallows everything). Two duplicate findings merged."
+ },
+ {
+  "file": "web/app.js",
+  "line": 737,
+  "title": "Armed danger buttons never disarm: 'Delete forever', 'Delete link', 'Remove phone' etc. stay armed indefinitely, so a much later stray click fires instantly",
+  "kind": "ux",
+  "severity": "P3",
+  "fix": "Add one helper near deleteControl: `function armOnce(b, label) { if (b.dataset.armed) return true; b.dataset.armed = '1'; const old = [...b.childNodes]; if (b.lastChild.nodeType === 3 || !b.querySelector('span')) b.textContent = label; else b.lastChild.textContent = label; const reset = () => { if (!b.isConnected || !b.dataset.armed) return; delete b.dataset.armed; b.replaceChildren(...old); }; b.addEventListener('blur', reset, { once: true }); setTimeout(reset, 4000); return false; }` and convert the seven sites to `if (!armOnce(b, 'Delete \u2026')) return;`: share delete (737-741, also re-hide purge in reset path or leave it visible \u2014 harmless), collection upload delete (653-655), user delete (979-981), device remove (1258-1260), remote remove (1520-1522), file delete (1606-1607, which uses b.lastChild to keep its icon), trash delete-forever (1638-1640).",
+  "notes": "Verified: nothing ever deletes dataset.armed at any of the seven sites \u2014 no blur, timeout or pointer-leave \u2014 so an armed 'Delete forever' (unrecoverable) fires on a single click minutes later. Mitigated by the visible label change, hence P3. Implementer note: the file-delete site mutates b.lastChild.textContent to preserve its icon; the helper must restore original child nodes, not plain text."
+ },
+ {
+  "file": "web/app.js",
+  "line": 548,
+  "title": "In-app form errors and 'Saved' confirmations are silent for screen readers (only login/setup have role=alert)",
+  "kind": "a11y",
+  "severity": "P3",
+  "fix": "Add `role: 'alert'` to each err element and `role: 'status'` to each saved element at creation. Simplest: two helpers near h() \u2014 `const errEl = (tag = 'p') => h(tag, { class: 'err', role: 'alert' });` and `const savedEl = () => h('span', { class: 'saved', role: 'status' });` \u2014 and use them at the ~14 sites: new link err (548), collection add err (509), folder-panel err (668), share edit editErr/saved (698-699), drop err (754), user err/saved (936-937), user actErr (970), token err/saved (1032-1033), settings section err/saved (1134-1135), remotes err (1544), 2FA err (1196), newFolder/rename/delete inline errs (1567, 1584, 1604). An empty alert element whose textContent is later set announces reliably.",
+  "notes": "Verified: only app.js:152/176/190 carry role=alert; every other async form writes failure/success into bare elements, so a screen-reader user submitting any share, user, token or settings form hears nothing either way (WCAG 4.1.3). Pure attribute additions, zero behavioral risk."
+ }
+]
