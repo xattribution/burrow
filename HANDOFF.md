@@ -72,7 +72,35 @@ fix, notes). Status per finding is updated below as implementation lands.
 
 ### Backend — judge pending (run `wf_c54ec33d-ab6`)
 
-### Periphery (tests/docs/Android/tether) — judge pending (run `wf_0b410a44-3f9`)
+### Periphery (20 verified of 34 raw; `HANDOFF-findings/periphery.json`)
+
+**Android findings are REPORT-ONLY** (no Kotlin toolchain in this container) — they are
+serious and deserve their own follow-up session with `./gradlew :shared:jvmTest`:
+
+- P1 **P0** Sync.kt:129 — two-way sync DELETES remote dotfiles/hidden trees the phone
+  can't see (verified plan-table walkthrough; trash purge makes it permanent)
+- P4 P1 Channel.kt:120 — any non-Burrow 401 (e.g. Authelia in front) permanently
+  unpairs the phone and wipes device keys
+- P5 P1 LocalTrees.kt:161 — SafTree.write treats failed renameDocument as success →
+  next sync deletes the remote copy
+- P6 P1 Transfers.kt:185 — retried transfers duplicate files as "name (2).ext"
+- P19 P2 work/Sync.kt:85 — same sync pair can run concurrently in three workers
+- P20 P2 Sync.kt:426 — move detection trusts (size,mtime), never the stored hash
+
+Implementable here (Go/sh/yaml):
+- P2 P1 shares.go:733 — folder-share download limit miscounts (one resume cookie slot)
+- P3 P1 install.sh:70 — `cmd && …` swallows failures under set -e (update w/o backup,
+  failed pull reports success, failed restore prints "Restored")
+- P7 P1 devices.go:496 — one shared rate-limit bucket: hostile peer locks out all phones
+- P8/P9/P10/P17 — missing tests: revoked grant vs in-flight upload; token Access
+  injection; MCP edit tools with folder-limited token; backup/restore round-trip
+- P11 P2 release.yml:169 — apk release job doesn't depend on image job
+- P12 P2 devices.go:196 — certPins() strands tether-only phones on cert change
+- P13 P2 tether.go:140 — transient listener error latched forever in sync.Once
+- P14 P2 tether.go:266 — run() blocks forever on <-exited after scanner failure
+- P15 P2 devices.go:625 — pre-auth slowloris: no read deadline on channel endpoints
+- P16 P2 shares.go:347 — PATCH expires_hours:0 kills link immediately (vs create)
+- P18 P2 release.yml:80 — no build caching in CI
 
 ## Implementation status
 

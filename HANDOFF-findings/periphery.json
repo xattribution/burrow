@@ -1,0 +1,178 @@
+[
+ {
+  "file": "/home/user/burrow/android/shared/src/commonMain/kotlin/io/github/xattribution/burrow/core/Sync.kt",
+  "line": 129,
+  "title": "Two-way sync deletes remote dotfiles/hidden trees the phone side can't see",
+  "kind": "sync-data-loss",
+  "severity": "P0",
+  "fix": "In SyncEngine.run, apply the same hidden-name filter to BOTH listings before planning. Add an open method `fun hides(path: String): Boolean` to the LocalTree interface, default implementation `path.split('/').any { it.startsWith(\".burrow-\") || it.startsWith(\".pending-\") || it.startsWith(\".trashed-\") }`; PhoneTree (android/app/src/main/kotlin/io/github/xattribution/burrow/data/LocalTrees.kt:45) overrides it with its all-dotfiles rule (any segment starting with '.') and its list() no longer filters dots itself. Then line 122 becomes `remote = l.entries.filterNot { excluded(it.path, excludes) || local.hides(it.path) }...` and line 129's inline segment filter is replaced by `|| local.hides(it.path)`. With both sides hidden, existing base rows resolve via the GONE&&GONE -> Forget branch instead of DelRemote.",
+  "notes": "REPORT-ONLY (Kotlin; needs compile + JVM tests). Verified end to end: Sync.kt:122 filters remote only by server excludes; Sync.kt:129 filters local only; PhoneTree.list hides every dot segment (LocalTrees.kt:45); server defaultExcludes (indexer.go:48) has no dotfile rule, so .gitignore/.stfolder/.git pass. Plan table confirmed: sync 1 ABSENT&&NEW -> Download records a base row; sync 2 local list hides it -> GONE&&SAME -> DelRemote. Trash purges after 30 days (writes.go: trashKeep), so the loss becomes permanent."
+ },
+ {
+  "file": "/home/user/burrow/shares.go",
+  "line": 733,
+  "title": "Download limit miscounts on folder shares: one resume-cookie slot per share, signed per file",
+  "kind": "correctness",
+  "severity": "P1",
+  "fix": "Production fix: make the resume cookie per-file so fetching another file doesn't overwrite it. Change `resumeCookie` to take the sub path: `func (a *App) resumeCookie(id, sub string) string { if sub == \"\" { return \"br_\" + id }; return \"br_\" + id + \"-\" + a.sign(\"rc|\"+id+\"|\"+sub)[:8] }` and update both callers (grantResume shares.go:738, resumeOK shares.go:742) to pass sub. Then add TestDownloadLimitPerFileOnFolderShare to burrow_test.go: e := setup(t); POST /api/shares {path:\"PROJECTS/lamp\", max_downloads:3}; one cookie-jar client (newBrowser pattern from TestDownloadLimit, burrow_test.go:472); GET /s/{id}/raw?p=shade.stl (expect 200, getShare DL==1), GET /s/{id}/raw?p=sub/inner.txt (200, DL==2), GET /s/{id}/raw?p=shade.stl again (200, DL still 2 per the documented per-file contract at shares.go:707-711). The test fails before the fix.",
+  "notes": "Verified: resumeCookie (shares.go:733) names one cookie per share; grantResume signs over sub (shares.go:738) and SetCookie overwrites the slot; resumeOK (shares.go:741-751) then fails for the first file and gateDownload counts it again. TestDownloadLimit (burrow_test.go:468) only covers a single-file share where sub is always empty. Real-world effect: preview-then-download across two files in a gallery burns the limit and 410s legitimate recipients."
+ },
+ {
+  "file": "/home/user/burrow/install.sh",
+  "line": 70,
+  "title": "install.sh: `cmd && ...` lists swallow failures under set -e \u2014 update proceeds without backup, failed pull reports success, failed restore prints 'Restored'",
+  "kind": "deploy-bug",
+  "severity": "P1",
+  "fix": "Three spots, same root cause (errexit does not fire for a failing command on the left of &&; reproduced empirically). (1) Line 70: replace `backup_to \"$f\" && echo \"Backed up first: $DIR/backups/$f\"` with `if ! backup_to \"$f\"; then echo \"Backup failed; not updating.\"; exit 1; fi` then `echo \"Backed up first: $DIR/backups/$f\"`. (2) Line 91: before the tag `case` at line 86, capture `old_tag=$(grep '^BURROW_TAG=' \"$DIR/.env\" | cut -d= -f2- || true)`; replace `compose pull && compose up -d` with `compose pull || { set_env BURROW_TAG \"$old_tag\"; echo \"Image pull failed; nothing changed.\"; exit 1; }` then `compose up -d` on its own line. Apply the same two-statement split to line 55 in the install branch. (3) Line 125: split `cp \"$f\" \"$DIR/state/burrow.db\" && chown \"$OWNER\": \"$DIR/state/burrow.db\"` into two statements so a failed cp aborts before `compose start` and the 'Restored from' message.",
+  "notes": "Merged three auditor findings (lines 70, 91/55, 125) \u2014 one root cause, one pass over install.sh. Verified empirically in this review: under `set -euo pipefail`, `f && echo ok; more-commands` continues with exit 0 after f fails. Without (2), line 89 has already pinned a possibly bogus BURROW_TAG, the still-running old container passes the health loop, and the script prints 'Running <old>.' with exit 0. Without (3), line 124 has already deleted burrow.db-wal/-shm (discarding uncheckpointed transactions) before the false success message. README.md promises the pre-update backup."
+ },
+ {
+  "file": "/home/user/burrow/android/shared/src/commonMain/kotlin/io/github/xattribution/burrow/core/Channel.kt",
+  "line": 120,
+  "title": "Any non-Burrow 401 (auth proxy in front of the public URL) permanently unpairs the phone and wipes its device keys",
+  "kind": "destructive-error-handling",
+  "severity": "P1",
+  "fix": "Treat 401 as 'unpaired' only when the body is Burrow's own error string. In current() (Channel.kt:120): `401 -> if (errorText(bytes, \"\") == \"this device isn't paired\") throw NotPairedException(\"This phone was removed from Burrow. Pair it again.\") else throw ChannelException(errorText(bytes, \"Burrow answered 401.\"))`. In the tunnel call's 401 branch (Channel.kt:255-261): keep the existing msg == \"session\" renew-and-retry, map msg == \"this device isn't paired\" to NotPairedException, and throw ChannelException for any other body. No server change: the server's only 401 bodies are {\"error\":\"this device isn't paired\"} (devices.go:519) and {\"error\":\"session\"} (devices.go:641).",
+  "notes": "REPORT-ONLY (Kotlin). Verified: Channel.kt:120 throws NotPairedException on any hello 401 without reading the body; burrowCodes = {200,401,403,429} lets a 401-answering middlebox win the multi-address race; Connection.kt:136-138 catches NotPairedException and calls forget(), and DeviceStore.clear() wipes the sealed device key and its Keystore wrapping key \u2014 unrecoverable, re-pairing required. A reverse proxy with basic auth / Authelia / Cloudflare Access in front of the public URL answers 401 with its own body."
+ },
+ {
+  "file": "/home/user/burrow/android/app/src/main/kotlin/io/github/xattribution/burrow/data/LocalTrees.kt",
+  "line": 161,
+  "title": "SafTree.write treats failed renameDocument as success after deleting the original; next sync deletes the remote copy",
+  "kind": "sync-data-loss",
+  "severity": "P1",
+  "fix": "In SafTree.write, replace `val renamed = DocumentsContract.renameDocument(cr, tmp, name) ?: tmp; ids[path] = DocumentsContract.getDocumentId(renamed)` with a loud failure: `val renamed = DocumentsContract.renameDocument(cr, tmp, name) ?: run { runCatching { DocumentsContract.deleteDocument(cr, tmp) }; ids.remove(path); throw java.io.IOException(\"couldn't rename the downloaded file into place: $path\") }; ids[path] = DocumentsContract.getDocumentId(renamed)`. The Download act then records no base row and is retried on the next sync.",
+  "notes": "REPORT-ONLY (Kotlin). Verified: LocalTrees.kt:159-162 deletes the existing document, then falls back to the '.burrow-dl-<name>' temp document when renameDocument returns null (providers without rename support); the trailing stat(path) succeeds through the cached id, so write() reports success and the engine records a base row. Next sync's listing filters '.burrow-dl-' names (Sync.kt:129) -> ld=GONE, rd=SAME -> TWO_WAY DelRemote trashes the remote original while the local copy exists only under the hidden temp name. The sibling rename() at LocalTrees.kt:184 handles null correctly (`?: return false`), confirming null is an expected outcome."
+ },
+ {
+  "file": "/home/user/burrow/android/app/src/main/kotlin/io/github/xattribution/burrow/work/Transfers.kt",
+  "line": 185,
+  "title": "Retried copy/move transfers re-copy already-transferred files as 'name (2).ext' duplicates (up to 8 attempts)",
+  "kind": "transfer-duplication",
+  "severity": "P1",
+  "fix": "In copyAcross's inner copy() (Transfers.kt:185-205), before the file put, skip files the destination already has from an earlier attempt: `val target = if (into.isEmpty()) e.name else \"$into/${e.name}\"; val existing = runCatching { dst.stat(target) }.getOrNull(); if (existing != null && !existing.dir && existing.size == e.size) { done += e.size; return }` then proceed with dst.put. Apply the same stat-skip before the non-home single-file put in the `direction == \"up\" && place != Place.HOME` branch (Transfers.kt:111-122).",
+  "notes": "REPORT-ONLY (Kotlin). Verified: any unclassified exception returns Result.retry() leaving the row queued (Transfers.kt:165-168, runAttemptCount < 8); on retry copyAcross restarts the full walk and every put is rename-unique \u2014 BurrowFs.put uses conflict=\"rename\" (PlaceFs.kt:90), PhoneFs.put loops \"$base ($i)$ext\" on createNewFile (PhoneFs.kt:126-129), SmbFs likewise. A folder copy interrupted at file 50/100 duplicates files 1-50 on each subsequent attempt. Only home single-file uploads resume via upload_id."
+ },
+ {
+  "file": "/home/user/burrow/devices.go",
+  "line": 496,
+  "title": "All tether traffic shares one hello/pair rate-limit bucket: one hostile peer locks out every tethered phone for 15 minutes, renewably",
+  "kind": "security-dos",
+  "severity": "P1",
+  "fix": "In handleHello (devices.go:495-505): read and length-check the body first (it already caps at 4KiB via chBody), extract devID, then key the limiter per claimed device when the request came through the bridge: `ipKey := \"hello:\" + limitIP(a.clientIP(r)); if viaTether(r) { ipKey = \"hello:dev:\" + devID }` before the a.limiter.take call (keep the refund at devices.go:527 using the same key variable). In handlePair (devices.go:408-417), do the same with the pairing code id parsed from the request (`\"pair:code:\"+codeID` when viaTether). LAN/public-port behavior is unchanged.",
+  "notes": "Verified: tetherWrap sets every bridge request's RemoteAddr to the constant tetherPeerIP 100::7e7e (tether.go:40,424), handleHello keys on that address with helloLimit=60 per 15 min (devices.go:54,496-498), and limiter.take counts the attempt before evaluation, refunding only successes (auth.go:95-133, devices.go:527). 60 garbage-MAC hellos from any paired-but-hostile (or just-revoked, until reconcile lands) peer 429s every other phone's tether hello for 15 minutes, repeatably."
+ },
+ {
+  "file": "/home/user/burrow/writes_test.go",
+  "title": "No test that revoking a write grant stops an in-flight resumable upload",
+  "kind": "test-coverage",
+  "severity": "P1",
+  "fix": "Add TestUploadRefusedAfterGrantRevoked to writes_test.go: e := setup(t); u := e.mkUser(\"ed\", false, Grant{Path: \"PROJECTS/lamp\", Read: true, Write: true}); ed := e.as(\"ed\", \"longenough-ed\"); ed starts an upload (POST /api/uploads {dir:\"PROJECTS/lamp\", name:\"x.bin\", size:10}, expect 200) and PUTs the first 5 bytes (expect 200). Admin then narrows the grant: e.do(\"PATCH\", \"/api/users/\"+itoa(u.ID), map[string]any{\"grants\": []Grant{{Path: \"PROJECTS/lamp\", Read: true}}}, 200). Assert ed's next chunk PUT returns 403, POST /api/uploads/{id}/finish returns 403, and os.Stat on filepath.Join(e.data, \"PROJECTS/lamp/x.bin\") reports IsNotExist.",
+  "notes": "Verified: every chunk re-checks permissions today (apiUploadChunk -> partDir writes.go:950 -> writableDir remote_ops.go:385 -> u.can(rel, permWrite) writes.go:126-128; finish re-runs newEntry writes.go:1045) but no test covers a grant change between start and chunk/finish \u2014 TestResumableUploads only refuses a read-only user at start (writes_test.go:283-285). A refactor that caches the start-time check would let a revoked user keep writing through an open upload id."
+ },
+ {
+  "file": "/home/user/burrow/tokens_test.go",
+  "title": "TokenScope.Access injection via POST/PATCH /api/tokens is an untested security boundary",
+  "kind": "test-coverage",
+  "severity": "P1",
+  "fix": "Add TestTokenAccessFieldNotSettable to tokens_test.go: e := setup(t); POST /api/tokens with body {\"name\":\"forged\",\"scope\":{\"api\":true,\"access\":[\"read\",\"share\",\"edit\"],\"tools\":{}}} (expect 200, unmarshal token+id). Via e.bearer assert: GET /api/raw?path=DOCS/notes.txt returns 404; POST /api/fs/mkdir {path:\"DOCS/x\"} is not 200; POST /api/shares {path:\"DOCS/notes.txt\"} is not 200. Then PATCH /api/tokens/{id} with the same forged scope (as the admin session, expect 200) and re-assert all three; finally assert GET /api/tokens echoes a scope whose access list is empty.",
+  "notes": "Verified: the only guard is that cleanScope silently drops Access \u2014 tokens.go:195 rebuilds the struct without copying in.Access \u2014 while groups() grants read/share/edit from Access whenever API is true (tokens.go:93-98); the comment at tokens.go:42-44 says only Burrow itself sets it. No existing test sends an access field, so a round-trip refactor of cleanScope would let any user mint a full read/share/edit REST token with zero tools chosen."
+ },
+ {
+  "file": "/home/user/burrow/tokens_test.go",
+  "title": "MCP edit tools (write/move/delete) never tested with a folder-limited token",
+  "kind": "test-coverage",
+  "severity": "P1",
+  "fix": "Add TestTokenEditToolsRespectFolders to tokens_test.go: build `all` from mcpTools as TestTokenScopeFolders (tokens_test.go:101) does (delete create_file_drop), then `_, call := e.mcpClient(map[string]any{\"tools\": all, \"folders\": []string{\"PROJECTS/lamp\"}})`. Assert: write_text_file {path:\"PROJECTS/lamp/ok.txt\", text:\"x\"} succeeds; write_text_file {path:\"DOCS/evil.txt\"} has isError true; create_folder {path:\"DOCS/made\"} isError; move_item {from:\"PROJECTS/lamp/shade.stl\", to:\"DOCS/shade.stl\"} isError and the file still exists at filepath.Join(e.data, \"PROJECTS/lamp/shade.stl\"); delete_item {path:\"DOCS/notes.txt\"} isError and the file remains on disk.",
+  "notes": "Verified: TestTokenEditTools (tokens_test.go:150) uses e.mcpClient(nil) \u2014 no folder limit; TestTokenScopeFolders sets folders but exercises only read/share tools. The write-path enforcement (u.lim.covers in User.can, users.go:290; newEntry re-check of the destination, writes.go:147-150) is untested for permWrite, including move_item with a destination outside the token's folders \u2014 a lim.covers regression would let a one-folder token modify or exfiltrate-by-move the whole library."
+ },
+ {
+  "file": "/home/user/burrow/.github/workflows/release.yml",
+  "line": 169,
+  "title": "apk release job doesn't depend on the image job: release notes can advertise a ghcr tag that was never pushed",
+  "kind": "ci-correctness",
+  "severity": "P2",
+  "fix": "Change line 169 from `needs: [test, android, android-device]` to `needs: [test, image, android, android-device]` (one changed line).",
+  "notes": "Verified: the image job (release.yml:62) pushes the ghcr tags; on a v* tag it runs in parallel with apk, whose publish step writes `ghcr.io/${GITHUB_REPOSITORY}:${V#v}` into the release notes (release.yml:224) and creates the public release (226-230). A failed or still-running multi-arch build leaves the published release pointing at a nonexistent image."
+ },
+ {
+  "file": "/home/user/burrow/devices.go",
+  "line": 196,
+  "title": "certPins() returns only the current certificate: any cert change permanently strands tether-only phones",
+  "kind": "availability",
+  "severity": "P2",
+  "fix": "Keep a one-deep pin history. When the cert source detects a changed certificate (the hot-reload in tls.go), store the outgoing cert's SHA-256 fingerprint with a timestamp in the settings table (e.g. key \"prev_cert_pin\" = \"<base64url-fp>|<unix>\"), and have certPins() (devices.go:196-201) return [current, previous] while the previous entry is younger than 90 days. The app already consumes a list (ServerInfo.pins) and refreshes pins on every successful hello, so an overlap window is all that's needed; no Android change.",
+  "notes": "Verified: devices.go:196-201 returns exactly one fingerprint. On the tether route the app dials https://127.0.0.1:<port> (Tether.kt url()), where no public cert passes hostname verification, so acceptance rests on the pin fallback (OkHttpTransport hostnameVerifier/pinned); pins refresh only inside a successful hello. After a cert rotation, a phone whose only route is tether (the CGNAT case the feature exists for) fails TLS with its stale pin, cannot hello, and can never learn the new pin until it visits the LAN."
+ },
+ {
+  "file": "/home/user/burrow/tether.go",
+  "line": 140,
+  "title": "listener() latches a transient error in sync.Once forever, permanently disabling tether until process restart",
+  "kind": "bug",
+  "severity": "P2",
+  "fix": "Replace lnOnce/lnErr with a mutex-guarded lazy init that latches only success: in listener(), under a lock, `if t.lnAddr != \"\" { return t.lnAddr, nil }`; otherwise check t.a.tlsCfg and call net.Listen afresh, returning any error WITHOUT storing it; on success store lnAddr and start the TLS server goroutine exactly as today (tether.go:146-153). Remove the lnOnce and lnErr fields.",
+  "notes": "Verified: tether.go:139-156 caches the first failure (nil tlsCfg or a listen error) in t.lnErr inside sync.Once; every later run() returns it immediately (tether.go:188-191) and supervise retries forever, logging 'bridge stopped' up to once a minute while the feature can never come up even after the cause clears."
+ },
+ {
+  "file": "/home/user/burrow/tether.go",
+  "line": 266,
+  "title": "run() blocks forever on <-exited after a stdout-scanner failure; the orphaned bridge keeps serving peers while revocation silently stops",
+  "kind": "bug",
+  "severity": "P2",
+  "fix": "After the `for sc.Scan()` loop in run() (tether.go:236-258) and before the `return <-exited` at tether.go:266: `if err := sc.Err(); err != nil { log.Printf(\"tether: reading the bridge: %v\", err); _ = stdin.Close(); select { case e := <-exited: return e; case <-time.After(5 * time.Second): _ = cmd.Process.Kill() } }` \u2014 mirroring the ctx.Done shutdown branch at tether.go:222-229 \u2014 then fall through to the existing cleanup and `return <-exited`.",
+  "notes": "Verified: the scanner caps a line at 1MiB (tether.go:235) while the status reply grows with peer count (tether/src/main.rs status handler); on bufio.ErrTooLong the loop exits without closing stdin, the child keeps waiting on its open stdin (main.rs: `while let Some(line) = lines.next_line()`), so `return <-exited` blocks forever: supervise never restarts it, t.stdin is nil so reconcile() returns early \u2014 yet the child keeps forwarding trusted peers, so a device revoked after this point is never removed from the bridge until tether is toggled off. sc.Err() is never checked today."
+ },
+ {
+  "file": "/home/user/burrow/devices.go",
+  "line": 625,
+  "title": "Channel endpoints read request bodies with no read deadline: pre-auth slowloris can park handler goroutines forever on the public port",
+  "kind": "security-dos",
+  "severity": "P2",
+  "fix": "At the top of handleTunnel (before the io.ReadFull at devices.go:624-625), handlePair and handleHello (before their chBody calls): `rc := http.NewResponseController(w); _ = rc.SetReadDeadline(time.Now().Add(30 * time.Second))`. In handleTunnel, clear it with `_ = rc.SetReadDeadline(time.Time{})` once the first segment has authenticated, so long streaming uploads still work.",
+  "notes": "Verified: both servers set only ReadHeaderTimeout 15s and IdleTimeout 120s (main.go:207-208; the tether loopback listener tether.go:152) \u2014 neither covers body reads mid-request. /api/d and /api/d/hello are reachable unauthenticated on the public port (api.go:227-229, 348), so anyone can POST and send zero body bytes to hold a goroutine indefinitely."
+ },
+ {
+  "file": "/home/user/burrow/shares.go",
+  "line": 347,
+  "title": "PATCH /api/shares with expires_hours:0 kills the link immediately (createShare treats 0 as 'server default'); lifecycle edits untested",
+  "kind": "api-contract",
+  "severity": "P2",
+  "fix": "Production fix in patchShare (shares.go:347-352): treat *p.ExpiresHours == 0 as 'leave unchanged' so a round-tripped share object doesn't kill its link \u2014 change the branch to `if *p.ExpiresHours < 0 { set(\"expires\", 0) } else if *p.ExpiresHours > 0 { set(\"expires\", now()+int64(*p.ExpiresHours*3600)) }`. Then add TestPatchShareLifecycle to burrow_test.go: create a link on DOCS/notes.txt with max_downloads 1; GET /s/{id}/dl -> 200, fresh client -> 410; PATCH {\"reset_count\": true, \"max_downloads\": 5} -> fresh GET /s/{id}/dl 200, getShare shows DL==1 and MaxDL==5; PATCH {\"expires_hours\": -1} -> getShare Expires==0, link still 200; PATCH {\"expires_hours\": 0} -> link still 200 and Expires unchanged (pins the new semantics).",
+  "notes": "Verified: patchShare writes `expires = now()+0` for *p.ExpiresHours == 0 (shares.go:347-352) \u2014 instant death \u2014 while createShare's 0 means 'use default_expiry_hours' (shares.go:284-289). ResetCount (shares.go:374-376) and MaxDownloads edits have zero test coverage; patchShare is only ever tested with revoked/note."
+ },
+ {
+  "file": "/home/user/burrow/burrow_test.go",
+  "title": "No backup/restore round-trip test for `burrow backup`'s VACUUM INTO on a live server",
+  "kind": "test-coverage",
+  "severity": "P2",
+  "fix": "Add backup_test.go with TestBackupRoundTripWhileRunning: e := setup(t); create a share s on DOCS/notes.txt and a user via e.mkUser(\"bob\", false, Grant{Path: \"DOCS\", Read: true}). dest := filepath.Join(t.TempDir(), \"backup.db\"); run exactly the statement main.go runs: `if _, err := e.app.st.db.Exec(`+\"`\"+`VACUUM INTO ?`+\"`\"+`, dest); err != nil { t.Fatal(err) }`. Then st2, err := openStore(dest); app2, err := newApp(e.app.cfg, st2); srv2 := httptest.NewServer(app2.routes()). Assert: admin login (admin/longenough1) returns 200 against srv2; bob's login returns 200; a cookie-less GET of srv2.URL+\"/s/\"+s.ID+\"/raw\" returns 200 with the notes body; and st2.get(\"secret\") equals e.app.st.get(\"secret\").",
+  "notes": "Verified: the documented recovery path runs `VACUUM INTO` on a running WAL-mode server (main.go:114-130) and install.sh's update/restore depend on it, yet nothing verifies the copy reopens through openStore (which re-runs schema + migrations) with users, shares and the signing secret intact (store.go:118 seeds \"secret\"). openStore/newApp/routes/setup helpers all exist as cited. A migration that errors on an already-migrated copy would make every backup silently unrestorable, discovered only during a disaster."
+ },
+ {
+  "file": "/home/user/burrow/.github/workflows/release.yml",
+  "line": 80,
+  "title": "No build caching: CI recompiles cargo-zigbuild, both Rust targets and the full Go dep tree cold on every image build",
+  "kind": "optimization",
+  "severity": "P2",
+  "fix": "Two complementary one-spot changes. (1) release.yml:81, add to the docker/build-push-action@v6 `with:` block: `cache-from: type=gha` and `cache-to: type=gha,mode=max`. (2) Dockerfile:11, give the Go stage the same cache treatment the Rust stage already has: `RUN --mount=type=cache,target=/root/.cache/go-build,id=gobuild-$TARGETARCH --mount=type=cache,target=/go/pkg/mod CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags \"-s -w -X main.version=${VERSION}\" -o /out/burrow .`",
+  "notes": "Merged two auditor findings (release.yml cache + Dockerfile Go cache mounts) \u2014 one build-caching fix. Verified: no cache-from/cache-to anywhere in .github/ (grep); setup-buildx-action@v3 creates an ephemeral builder each run so the Dockerfile's existing Rust cache mounts (Dockerfile:22-24) and the `cargo install --locked cargo-zigbuild@0.23.4` layer (Dockerfile:17) are discarded; the Go build line (Dockerfile:11) has no cache mounts, so any source change past `COPY . .` recompiles every Go dependency."
+ },
+ {
+  "file": "/home/user/burrow/android/app/src/main/kotlin/io/github/xattribution/burrow/work/Sync.kt",
+  "line": 85,
+  "title": "The same sync pair can run concurrently in three workers (periodic, sync-now, photos-watch), racing on the base table",
+  "kind": "race-condition",
+  "severity": "P2",
+  "fix": "Serialize per pair inside the engine: in SyncEngine (shared/src/commonMain/.../core/Sync.kt) add `companion object { private val locks = java.util.concurrent.ConcurrentHashMap<Long, kotlinx.coroutines.sync.Mutex>() }` and wrap the body of SyncEngine.sync in `locks.getOrPut(pair.id) { Mutex() }.withLock { ... }`, re-reading the pair row inside the lock so the base snapshot is fresh.",
+  "notes": "REPORT-ONLY (Kotlin). Verified: three independent unique-work names can each run a SyncWorker over the same pair \u2014 the hourly \"sync-${p.id}\" (work/Sync.kt:52-63), on-demand \"sync-now-${pairId ?: \"all\"}\" (work/Sync.kt:85; \"all\" is distinct from the per-pair name), and the \"photos-watch\" one-time work (work/Sync.kt:76), which also iterates media pairs. WorkManager uniqueness is per name; SyncEngine has no lock, so two runs share a base snapshot, both plan Upload with conflict=\"fail\" (one 409s), and interleaved putBase/putPending writes can record stale stamps causing spurious KeepBoth copies."
+ },
+ {
+  "file": "/home/user/burrow/android/shared/src/commonMain/kotlin/io/github/xattribution/burrow/core/Sync.kt",
+  "line": 426,
+  "title": "Move detection matches by (size, mtime) only and never checks the stored hash: a stamp collision ships wrong content and marks it synced",
+  "kind": "sync-data-loss",
+  "severity": "P2",
+  "fix": "In detectMoves (Sync.kt:426-443), verify content before accepting a move: pass the LocalTree in from plan() (which already has it), and after `val from = cands.single().key` add `val want = base.getValue(from).hash; if (want.isNotEmpty() && runCatching { Uploader.sha256 { tree.open(u.path) } }.getOrNull() != want) continue` before marking `used += from` and rewriting the plan. Costs one local hash per move candidate.",
+  "notes": "REPORT-ONLY (Kotlin). Verified: detectMoves pairs a vanished base file with a new local file purely by stamp (`byStamp[le.stamp]`, single candidate) and rewrites the plan to MoveRemote, removing the Upload; base rows carry a content hash (Base.hash) that is never consulted. If the user deletes A and creates B with matching size+mtime but different bytes (batch exports, timestamp-preserving restores), the server renames A's content to B's path and B's actual bytes are never uploaded until B is next edited."
+ }
+]
