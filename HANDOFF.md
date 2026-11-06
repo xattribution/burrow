@@ -136,6 +136,24 @@ Implementable here (Go/sh/yaml):
 - P8, P9, P10 new boundary tests in writes_test.go / tokens_test.go (3dd23b9)
 - First app.js correctness fixes snapshot (b2a5046)
 
+**Frontend wave DONE and pushed (cf2a1a0):** all 24 findings F1-F24 implemented,
+none skipped (details in the commit message). Verified by node --check, go build,
+AND a Playwright end-to-end smoke test at cf2a1a0: fresh state dir → real setup
+form → login → library indexed and rendered, zero page errors. Smoke script
+pattern: build in a worktree, run with BURROW_{STATE,DATA,DROP} temp dirs on
+:47990, drive with chromium ignoreHTTPSErrors. Leftover niggles a future agent
+could take: token-delete / 2FA-off buttons arm but never disarm (excluded from
+F23's seven sites); F14 part 3 (row-selection short-circuit in route()) not
+applied; one status poller may tick on the login screen after sign-out.
+
+**Backend wave A+B running since ~21:55 UTC** (runs wf_eddc4c71-495, wf_b8b4d5f2-211):
+5 agents on disjoint clusters — shares.go+tests (P2,P16,B8,B14,B16,B19,B22,P17),
+mcp/tokens/collections (B1,B4,B15,B25,B26,B23), api/thumbs/main (B2,B27,B5,B7,
+B24,B18,B28), indexer/writes (B13,B10,B11,B12), remote/transfer/tether/devices
+(B6,B9,B3,B21,B20). If this session dies mid-wave: the working tree holds their
+edits; run go build/vet + go test, commit what's green, consult the cluster JSONs
+(copies in HANDOFF-findings/) for what each id means.
+
 **Still open for a future agent:** P2, P16, P17 (shares.go + burrow_test.go —
 deliberately held back from the concurrent waves to avoid file collisions; cluster
 file content preserved in HANDOFF-findings/periphery.json), all Android items
