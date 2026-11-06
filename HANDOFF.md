@@ -26,16 +26,22 @@ for approval; commit + push continuously; document in parallel (this file).
 3. **Verify:** full `go test ./...` + `gofmt -l`, fix fallout, commit in logical groups,
    push after each group.
 
-## State
+## State — SPRINT COMPLETE (~22:20 UTC)
 
-- [x] Baseline: `go build ./...` OK, `go vet ./...` clean (Go 1.26.9).
-- [x] Baseline: full `go test ./...` GREEN (`ok burrow 57.4s`, exit 0) at 92d73ae.
-      `gofmt -l` flagged only share_nested_test.go; fixed. Any later test failure is ours.
-- [ ] Audit workflows: launched 20:50 UTC, results pending.
-      Run IDs (transcripts under `/root/.claude/projects/-home-user-burrow/.../workflows/`):
-      backend `wf_c54ec33d-ab6`, frontend `wf_54e5842f-dee`, periphery `wf_0b410a44-3f9`.
-- [ ] Implementation: not started.
-- [ ] Final verification/push: not started.
+- [x] Baseline at 92d73ae: build/vet/tests green.
+- [x] Audits: 3 workflows, 15 finders + 3 judges → 72 verified findings
+      (24 frontend, 28 backend, 20 periphery) in `HANDOFF-findings/*.json`.
+- [x] Implementation: 4 waves, 11 agents → **65 findings implemented, 0 skipped**
+      (every non-Android finding; 6 Android findings documented for a follow-up).
+- [x] Final verification at 9d8b5e1: `gofmt -l` clean, `go build` + `go vet` clean,
+      **full `go test ./...` GREEN (58.1s)**, `go test -race ./...` run (result in
+      final session summary), and a Playwright end-to-end smoke (fresh state →
+      setup form → login → indexed library, zero page errors) at both cf2a1a0
+      and 9d8b5e1.
+- 8 new tests added: per-file folder download limits, PATCH lifecycle, backup
+  round-trip on a live store, hostile-EXIF regression, revoked-grant uploads,
+  token access injection, folder-limited MCP edits (plus the race fix verified
+  with -race).
 
 ## Findings (filled in as judges return)
 
@@ -151,19 +157,24 @@ B10, B11, B12, B6, B9, B3, B21, B20 — all done, none skipped. Note: B3 added a
 downgrade-safe tokens.device_id column; B11's sentinel seeds only after
 initial_scan_done (agent's deliberate, documented deviation).
 
-**Backend wave A running since ~21:55 UTC** (run wf_eddc4c71-495):
-5 agents on disjoint clusters — shares.go+tests (P2,P16,B8,B14,B16,B19,B22,P17),
-mcp/tokens/collections (B1,B4,B15,B25,B26,B23), api/thumbs/main (B2,B27,B5,B7,
-B24,B18,B28), indexer/writes (B13,B10,B11,B12), remote/transfer/tether/devices
-(B6,B9,B3,B21,B20). If this session dies mid-wave: the working tree holds their
-edits; run go build/vet + go test, commit what's green, consult the cluster JSONs
-(copies in HANDOFF-findings/) for what each id means.
+**Backend wave A DONE and pushed (9de1948 + 9d8b5e1):** P2, P16, P17, B8, B14,
+B16, B19, B22 (shares + tests), B1, B4, B15, B25, B26, B23 (mcp/tokens/
+collections; B15's files.go half applied by the committer: resolve returns
+fs.ErrNotExist), B2, B27, B5, B7, B24, B18, B28 (api/thumbs/main) — all done,
+none skipped.
 
-**Still open for a future agent:** P2, P16, P17 (shares.go + burrow_test.go —
-deliberately held back from the concurrent waves to avoid file collisions; cluster
-file content preserved in HANDOFF-findings/periphery.json), all Android items
-(P1 P0!, P4, P5, P6, P19, P20), and whatever the backend judge + frontend wave
-report (tracked below as they land).
+**Still open for a future agent (the complete list):**
+1. The 6 Android findings (P1 is a P0 data-loss bug) — fixes are written out in
+   `HANDOFF-findings/periphery.json`; needs a session with
+   `./gradlew :shared:jvmTest` / `:app:testDebugUnitTest`.
+2. Frontend niggles: token-delete/2FA-off buttons arm but never disarm; F14
+   part 3 (row-selection short-circuit in route()); one status poller may tick
+   on the login screen after sign-out.
+3. B8 side effect (accepted): an owner can't reuse their own deleted slug while
+   its events remain (pruned after 365 days).
+4. B10: IndexStatus counts may be up to 30s stale between scans (cosmetic).
+5. Rejected-findings lists live in the workflow transcripts if anyone wants to
+   mine them (3 judges rejected 42 of 114 raw findings).
 
 Frontend wave launched (~21:28 UTC), three clusters:
 - app.js bugs (F1,F4,F2,F3,F5,F6,F7,F20,F22,F8) — agent 1
