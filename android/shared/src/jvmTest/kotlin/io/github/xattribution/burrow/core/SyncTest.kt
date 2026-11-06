@@ -243,6 +243,33 @@ class SyncTest {
         assertTrue(File(server.lib, "PHOTOS/video.mp4").readBytes().contentEquals(data))
     }
 
+    /** The phone's tree hides every dotfile, like PhoneTree on Android. */
+    private class DotHidingTree(private val inner: FileTree) : LocalTree by inner {
+        override fun hides(path: String) = path.split('/').any { it.startsWith(".") }
+        override suspend fun list() = inner.list().filterNot { hides(it.path) }
+    }
+
+    /** Files the phone side can't see must never be read as "deleted on the phone". */
+    @Test
+    fun hiddenFilesSurviveTwoWaySync() {
+        val fx = fixture(SyncMode.TWO_WAY, "SYNC/dots")
+        val tree = DotHidingTree(fx.tree)
+        fun sync(): SyncReport = runBlocking {
+            fx.engine.sync(fx.db.pairQueries.byId(fx.pairId).executeAsOne(), tree).also { assertEquals(emptyList(), it.errors, "sync errors") }
+        }
+        write(File(fx.remote, "visible.txt"), "seen")
+        write(File(fx.remote, ".gitignore"), "node_modules")
+        write(File(fx.remote, ".config/settings.json"), "{}")
+        settle()
+        assertEquals(1, sync().downloaded) // only visible.txt travels
+        assertFalse(File(fx.dir, ".gitignore").exists())
+        // the second sync used to read the hidden files as deleted on the phone and delete them on Burrow
+        repeat(2) { assertEquals(0, sync().changes) }
+        assertEquals("node_modules", File(fx.remote, ".gitignore").readText())
+        assertEquals("{}", File(fx.remote, ".config/settings.json").readText())
+        assertEquals("seen", File(fx.dir, "visible.txt").readText())
+    }
+
     @Test
     fun globMatchesLikeTheServer() {
         assertTrue(SyncEngine.excluded("a/._foo/b", listOf("._*")))
