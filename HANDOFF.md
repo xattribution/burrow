@@ -163,10 +163,24 @@ collections; B15's files.go half applied by the committer: resolve returns
 fs.ErrNotExist), B2, B27, B5, B7, B24, B18, B28 (api/thumbs/main) — all done,
 none skipped.
 
+**Android wave DONE (d2e1eb5 + ef88c45 + the completing commit):** all six
+findings fixed — P1/P0 (hidden-file deletion: LocalTree.hides() applied to both
+listings; PhoneTree overrides with its all-dotfiles rule), P4 (only Burrow's own
+401 body unpairs), P5 (SafTree failed rename now throws instead of faking
+success), P6 (retried transfers skip already-landed files — guarded to retry
+attempts only, a deliberate deviation noted in the code), P19 (per-pair mutex in
+SyncEngine.sync, pure-common Mutex map instead of the suggested
+java.util.ConcurrentHashMap which doesn't exist in commonMain), P20 (move
+detection verifies the stored hash before trusting a stamp match).
+Verified: a cloud env "burrow" was created allowing dl.google.com;
+`:shared:jvmTest` passes (7/7), including a NEW end-to-end regression test
+`hiddenFilesSurviveTwoWaySync` that boots the real Go server and proves hidden
+remote files survive two-way sync. NOT verified here: `:app` compilation
+(LocalTrees.kt/Transfers.kt) — the sandbox cannot accept Android SDK licenses;
+CI compiles :app on any pull_request, so opening the PR gives that check.
+
 **Still open for a future agent (the complete list):**
-1. The 6 Android findings (P1 is a P0 data-loss bug) — fixes are written out in
-   `HANDOFF-findings/periphery.json`; needs a session with
-   `./gradlew :shared:jvmTest` / `:app:testDebugUnitTest`.
+1. Verify :app compiles + `:app:testDebugUnitTest` (CI does this on PR).
 2. Frontend niggles: token-delete/2FA-off buttons arm but never disarm; F14
    part 3 (row-selection short-circuit in route()); one status poller may tick
    on the login screen after sign-out.
