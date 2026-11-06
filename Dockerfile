@@ -5,10 +5,13 @@ FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine AS build
 ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/burrow .
+# a build cache per architecture: the amd64 and arm64 builds run at once
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build,id=gobuild-$TARGETOS-$TARGETARCH \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/burrow .
 
 # burrow-tether, for Settings > Reach from anywhere: a static musl binary
 FROM --platform=$BUILDPLATFORM rust:1-alpine AS tether
