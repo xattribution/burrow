@@ -123,6 +123,8 @@ pre.code { font: 13px/1.5 var(--mono); background: var(--surface); padding: 10px
 .tip { position: absolute; inset-block-start: calc(100% + 6px); inset-inline-start: -8px; z-index: 20; inline-size: max-content; max-inline-size: 34ch; padding: 6px 8px; background: var(--ink); color: var(--paper); font-weight: 400; font-size: 13px; line-height: 1.4; text-align: start; visibility: hidden; }
 .info:hover .tip, .info:focus-visible .tip { visibility: visible; }
 .info[data-dismissed] .tip { visibility: hidden; }
+.info[data-open] .tip { visibility: visible; }
+.info::after { content: ""; position: absolute; inset: -8px; }
 
 /* charts on the overview page */
 .chart { display: grid; grid-template-columns: minmax(90px, max-content) 1fr auto; gap: 6px 10px; align-items: center; font-size: 13px; max-inline-size: 760px; }

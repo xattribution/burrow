@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -448,10 +449,12 @@ func qrPNG(text string, size int) ([]byte, error) {
 // ---- public share pages ----
 
 var shareTmpl = template.Must(template.New("").Funcs(template.FuncMap{
-	"size":  humanSize,
-	"date":  func(t int64) string { return time.Unix(t, 0).Format("Jan 2, 2006 15:04") },
-	"join":  func(a, b string) string { return strings.TrimPrefix(a+"/"+b, "/") },
-	"kindv": func(k string) bool { return k == "image" || k == "video" || k == "audio" },
+	"size":      humanSize,
+	"date":      func(t int64) string { return time.Unix(t, 0).Format("Jan 2, 2006 15:04") },
+	"join":      func(a, b string) string { return strings.TrimPrefix(a+"/"+b, "/") },
+	"kindv":     func(k string) bool { return k == "image" || k == "video" || k == "audio" },
+	"thumbable": func(e Entry) bool { return !e.IsDir && thumbExts[e.Ext] },
+	"v":         func() string { return version },
 }).ParseFS(webFS, "web/share.html"))
 
 type sharePage struct {
@@ -585,18 +588,22 @@ func (a *App) handleShare(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 		if bcrypt.CompareHashAndPassword([]byte(s.pwHash), []byte(r.FormValue("password"))) != nil {
 			a.logShare(r, s.ID, "password-fail", "")
-			a.renderShare(w, http.StatusUnauthorized, sharePage{S: s, Title: s.Label, NeedPW: true, PWError: true, State: "active"})
+			a.renderShare(w, http.StatusUnauthorized, sharePage{S: s, Title: s.Label, Sub: cleanRel(r.FormValue("p")), NeedPW: true, PWError: true, State: "active"})
 			return
 		}
 		a.limiter.refund(key)
 		a.limiter.refund(linkKey)
 		exp := strconv.FormatInt(now()+12*3600, 10)
 		http.SetCookie(w, &http.Cookie{Name: a.pwCookieName(s.ID), Value: exp + "." + a.sign(s.ID+"|"+s.pwHash+"|"+exp), Path: "/s/" + s.ID, HttpOnly: true, Secure: a.isHTTPS(r), SameSite: http.SameSiteLaxMode, MaxAge: 12 * 3600})
-		http.Redirect(w, r, "/s/"+s.ID, http.StatusSeeOther)
+		dest := "/s/" + s.ID
+		if p := cleanRel(r.FormValue("p")); p != "" {
+			dest += "?p=" + url.QueryEscape(p)
+		}
+		http.Redirect(w, r, dest, http.StatusSeeOther)
 		return
 	}
 	if !a.sharePWOK(r, s) {
-		a.renderShare(w, http.StatusUnauthorized, sharePage{S: s, Title: s.Label, NeedPW: true, State: "active"})
+		a.renderShare(w, http.StatusUnauthorized, sharePage{S: s, Title: s.Label, Sub: cleanRel(r.URL.Query().Get("p")), NeedPW: true, State: "active"})
 		return
 	}
 

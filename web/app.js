@@ -60,11 +60,20 @@ function icon(name, cls = '') {
 }
 // put replaces el's children, skipping null and false (replaceChildren would print "null").
 function put(el, ...kids) { el.replaceChildren(...kids.flat(Infinity).filter(k => k != null && k !== false)); }
+// errEl and savedEl are the empty elements forms write errors and confirmations into,
+// announced to screen readers when their text is set.
+const errEl = (tag = 'p') => h(tag, { class: 'err', role: 'alert' });
+const savedEl = () => h('span', { class: 'saved', role: 'status' });
+let tipId = 0;
 function info(text) {
-  return h('button', { type: 'button', class: 'info', 'aria-label': 'More about this' }, 'i', h('span', { class: 'tip', role: 'tooltip' }, text));
+  const id = 'tip-' + (++tipId);
+  return h('button', { type: 'button', class: 'info', 'aria-label': 'More about this', 'aria-describedby': id,
+    onclick: e => { const b = e.currentTarget; if ('open' in b.dataset) delete b.dataset.open; else b.dataset.open = ''; } },
+    'i', h('span', { class: 'tip', id, role: 'tooltip' }, text));
 }
-addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.info').forEach(b => b.dataset.dismissed = ''); });
+addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.info').forEach(b => { b.dataset.dismissed = ''; delete b.dataset.open; }); });
 addEventListener('pointerover', e => { const b = e.target.closest?.('.info'); if (b) delete b.dataset.dismissed; });
+addEventListener('focusin', e => { const b = e.target.closest?.('.info'); if (b) delete b.dataset.dismissed; });
 
 async function api(path, opts = {}) {
   const o = { method: opts.method || 'GET', headers: { 'X-Burrow': '1' } };
@@ -224,6 +233,7 @@ async function setupScreen(st, key = '') {
 
 // ---------- shell ----------
 let LIBS = [];
+let footTimer = 0;
 function shell() {
   const app = $('#app');
   const searchInput = h('input', { type: 'text', enterkeyhint: 'search', id: 'q', placeholder: 'Search every file and folder', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Search' });
@@ -238,8 +248,11 @@ function shell() {
     }, 110);
   });
   searchInput.addEventListener('keydown', e => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); moveSel(1); }
-    if (e.key === 'Enter') { e.preventDefault(); openSel(); }
+    const v = searchInput.value.trim();
+    const s = getState();
+    const fresh = s.view === 'search' && s.q === v;
+    if (e.key === 'Enter') { e.preventDefault(); if (v && !fresh) { clearTimeout(t); nav({ view: 'search', q: v, sel: '' }, s.view === 'search'); } else openSel(); }
+    if (e.key === 'ArrowDown' && fresh) { e.preventDefault(); moveSel(1); }
   });
   app.replaceChildren(
     h('div', { class: 'shell' },
@@ -253,9 +266,9 @@ function shell() {
         h('div', { class: 'sub', id: 'sub' }),
         h('div', { class: 'content', id: 'content' })),
       h('aside', { class: 'panel', id: 'panel', hidden: true, 'aria-label': 'Details' })));
-  loadNav();
+  navKey = null; // route() runs next and fills the rebuilt sidebar
   refreshFoot();
-  setInterval(refreshFoot, 15000);
+  clearInterval(footTimer); footTimer = setInterval(refreshFoot, 15000);
 }
 
 async function loadNav() {
@@ -294,6 +307,7 @@ async function refreshFoot() {
 // ---------- routing ----------
 let CURRENT = [];      // entries in the current list (for keyboard navigation)
 let routeSeq = 0;
+let navKey = null;     // the view|path the sidebar was last built for
 async function route() {
   if (!$('#content')) return;
   const s = getState();
@@ -301,7 +315,8 @@ async function route() {
   const q = $('#q');
   if (q && document.activeElement !== q) q.value = s.view === 'search' ? s.q : '';
   delete $('#content').dataset.drop;
-  loadNav();
+  const nk = s.view + '|' + s.path;
+  if (nk !== navKey) { navKey = nk; loadNav(); }
   try {
     if (s.view === 'search') await viewSearch(s, seq);
     else if (s.view === 'shares') await viewShares(s, seq);
@@ -420,8 +435,8 @@ addEventListener('keydown', e => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName);
   if (e.key === '/' && !typing) { e.preventDefault(); $('#q')?.focus(); $('#q')?.select(); return; }
   if (e.key === 'Escape') {
+    if (typing) { document.activeElement.blur(); return; }
     if (!$('#panel')?.hidden) { closePanel(); return; }
-    if (typing) document.activeElement.blur();
     return;
   }
   if (typing) return;
@@ -484,7 +499,7 @@ async function openPanelFor(path) {
   else if (d.preview === 'video') pv = h('video', { src: raw, controls: true, preload: 'metadata' });
   else if (d.preview === 'audio') pv = h('audio', { src: raw, controls: true, preload: 'metadata' });
   else if (d.preview === 'pdf') pv = h('iframe', { src: raw, title: e.name });
-  else if (d.preview === 'text') { pv = h('pre', {}, 'Loading…'); fetch(raw).then(r => r.text()).then(t => pv.textContent = t.slice(0, 20000)); }
+  else if (d.preview === 'text') { pv = h('pre', {}, 'Loading…'); fetch(raw, { headers: { Range: 'bytes=0-19999' } }).then(r => { if (!r.ok) throw new Error('Couldn’t load the preview.'); return r.text(); }).then(t => pv.textContent = t.slice(0, 20000)).catch(x => { pv.textContent = x.message; pv.className = 'muted'; }); }
 
   const favBtn = h('button', { class: 'iconbtn', 'aria-pressed': e.fav ? 'true' : 'false', 'aria-label': 'Favorite', title: 'Favorite',
     onclick: async () => {
@@ -506,7 +521,7 @@ async function openPanelFor(path) {
         : h('a', { class: 'btn', href: raw + '&dl=1' }, icon('download'), 'Download'),
       e.dir && s.path !== e.path ? h('button', { class: 'btn', onclick: () => nav({ view: 'browse', path: e.path, q: '', sel: '' }) }, 'Open') : null,
       copyBtn, favBtn),
-    d.can_change ? h('div', { class: 'row' }, renameControl(e), deleteControl(e)) : null,
+    d.can_change ? h('div', { class: 'row' }, renameControl(e), moveControl(e), deleteControl(e)) : null,
     d.can_share || d.shares.length ? h('h3', {}, 'Share links') : null,
     d.can_share || d.shares.length ? linksList(d.shares, () => { panelFor = ''; openPanelFor(path); route(); }) : null,
     d.can_share ? h('div', { class: 'row' }, newLinkForm(e, () => { panelFor = ''; openPanelFor(path); route(); }), addToFolderControl(e, () => { panelFor = ''; openPanelFor(path); route(); })) : null);
@@ -518,7 +533,7 @@ function addToFolderControl(e, done) {
     const all = (await api('/api/shares')).filter(x => x.mode === 'collection' && x.state === 'active');
     const sel = h('select', { 'aria-label': 'Shared folder' },
       all.map(x => h('option', { value: x.id }, x.label)), h('option', { value: '__new' }, 'New shared folder\u2026'));
-    const err = h('span', { class: 'err' });
+    const err = errEl('span');
     wrap.replaceChildren(sel,
       h('button', { class: 'btn primary', onclick: async () => {
         try {
@@ -561,7 +576,7 @@ function newLinkForm(e, done) {
   const openBtn = h('button', { class: 'btn primary', onclick: async () => {
     const st = await settings();
     const exp = expiryControl(st.default_expiry_hours);
-    const err = h('p', { class: 'err' });
+    const err = errEl();
     const f = h('form', { class: 'stack' },
       h('div', { class: 'field' }, h('span', {}, 'Expires'), exp.el),
       h('div', { class: 'grid2' },
@@ -573,11 +588,14 @@ function newLinkForm(e, done) {
       h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Create link'), h('button', { class: 'btn', type: 'button', onclick: () => wrap.replaceChildren(openBtn) }, 'Cancel')));
     f.addEventListener('submit', async ev => {
       ev.preventDefault();
+      const b = f.querySelector('button[type=submit]');
+      if (b.disabled) return;
+      b.disabled = true;
       try {
         const s = await api('/api/shares', { method: 'POST', body: { path: e.path, mode: 'link', password: f.pw.value, max_downloads: Number(f.max.value || 0), note: f.note.value, slug: f.slug.value, ...exp.read() } });
         copy(s.url);
         done();
-      } catch (x) { err.textContent = x.message; }
+      } catch (x) { err.textContent = x.message; } finally { b.disabled = false; }
     });
     wrap.replaceChildren(f);
     f.querySelector('select').focus();
@@ -635,7 +653,7 @@ async function viewShares(s, seq) {
   for (const x of rows) {
     const st = shareState(x);
     tb.append(h('tr', { 'aria-selected': s.share === x.id ? 'true' : 'false', onclick: () => nav({ share: x.id }, true) },
-      h('td', { class: 'name' }, h('span', {}, icon(x.mode === 'drop' ? 'inbox' : x.dir ? 'folder' : 'file', x.dir && x.mode !== 'drop' ? 'k-folder' : ''), h('span', { class: 'label' }, x.label || x.path)),
+      h('td', { class: 'name' }, h('span', {}, icon(x.mode === 'drop' ? 'inbox' : x.dir ? 'folder' : 'file', x.dir && x.mode !== 'drop' ? 'k-folder' : ''), h('a', { class: 'label', href: '?view=shares&share=' + x.id, onclick: ev => { ev.preventDefault(); ev.stopPropagation(); nav({ share: x.id }, true); } }, x.label || x.path)),
         h('span', { class: 'where' }, x.mode === 'drop' ? 'File drop into drop/' + x.path : x.mode === 'collection' ? `Shared folder, ${x.items || 0} item${x.items === 1 ? '' : 's'} plus uploads${x.allow_upload ? ', recipients can add files' : ''}` : x.path)),
       h('td', {}, h('span', { class: 'state ' + st }, STATE_TEXT[st])),
       ME.admin ? h('td', { class: 'muted hide-s' }, x.owner) : null,
@@ -655,10 +673,19 @@ async function collectionEditor(x, changed) {
     if (!fileIn.files.length) return;
     const fd = new FormData();
     for (const f of fileIn.files) fd.append('files', f, f.name);
+    status.className = 'muted';
     status.textContent = `Uploading ${fileIn.files.length} file${fileIn.files.length === 1 ? '' : 's'}…`;
-    const r = await fetch(`/api/shares/${x.id}/upload`, { method: 'POST', headers: { 'X-Burrow': '1' }, body: fd });
-    status.textContent = r.ok ? '' : 'Upload failed';
-    changed();
+    try {
+      const r = await fetch(`/api/shares/${x.id}/upload`, { method: 'POST', headers: { 'X-Burrow': '1' }, body: fd });
+      if (r.ok) { changed(); } else {
+        const d = await r.json().catch(() => ({}));
+        status.textContent = d.error || `Upload failed (${r.status})`;
+        status.className = 'err';
+      }
+    } catch {
+      status.textContent = 'Upload failed — connection lost';
+      status.className = 'err';
+    } finally { fileIn.value = ''; }
   });
   const row = (e, actions, missing) => h('tr', {},
     h('td', { class: 'name' }, h('span', {}, kindIcon(e), h('span', { class: 'label' }, e.name)), e.path !== e.name ? h('span', { class: 'where' }, missing ? 'Missing or no longer shared: ' + e.path : parentOf(e.path)) : null),
@@ -667,7 +694,7 @@ async function collectionEditor(x, changed) {
   const items = v.items.map(it => row(it, h('button', { class: 'btn', onclick: async () => { await api(`/api/shares/${x.id}/items?path=${encodeURIComponent(it.path)}`, { method: 'DELETE' }); changed(); } }, 'Remove'), it.missing));
   const ups = v.uploads.map(u => row({ ...u, path: u.name, kind: u.dir ? 'folder' : u.kind, ext: '' }, h('button', { class: 'btn danger', onclick: async ev => {
     const b = ev.currentTarget;
-    if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Delete file'; return; }
+    if (!armOnce(b, 'Delete file')) return;
     await api(`/api/shares/${x.id}/uploads?name=${encodeURIComponent(u.name)}`, { method: 'DELETE' }); changed();
   } }, 'Delete')));
   return h('div', {},
@@ -681,7 +708,7 @@ async function collectionEditor(x, changed) {
 async function openFolderPanel(addPath) {
   const st = await settings();
   const exp = expiryControl(st.default_expiry_hours);
-  const err = h('p', { class: 'err' });
+  const err = errEl();
   const f = h('form', { class: 'stack' },
     h('label', { class: 'field' }, h('span', {}, 'Name'), h('input', { name: 'label', required: true, placeholder: 'Trip photos for Dad' })),
     addPath ? h('p', { class: 'muted' }, 'Starts with ', h('b', {}, addPath)) : null,
@@ -693,11 +720,14 @@ async function openFolderPanel(addPath) {
     h('button', { class: 'btn primary', type: 'submit' }, 'Create shared folder'));
   f.addEventListener('submit', async ev => {
     ev.preventDefault();
+    const b = f.querySelector('button[type=submit]');
+    if (b.disabled) return;
+    b.disabled = true;
     try {
       const s = await api('/api/shares', { method: 'POST', body: { mode: 'collection', label: f.label.value, password: f.pw.value, note: f.note.value, allow_upload: !!f.up?.checked, items: addPath ? [addPath] : [], ...exp.read() } });
       copy(s.url);
       nav({ tab: '', add: '', share: s.id });
-    } catch (x) { err.textContent = x.message; }
+    } catch (x) { err.textContent = x.message; } finally { b.disabled = false; }
   });
   panelShell('New shared folder', f);
   f.label.focus();
@@ -711,8 +741,8 @@ async function openSharePanel(id) {
   const changed = () => { openSharePanel(id); if (getState().view === 'shares') viewShares(getState(), routeSeq); };
   const exp = expiryControl(-1);
   const purge = x.mode !== 'link' ? h('div', { class: 'checks', hidden: true }, h('label', {}, h('input', { type: 'checkbox' }), 'Also delete the files uploaded to it')) : null;
-  const editErr = h('p', { class: 'err' });
-  const saved = h('span', { class: 'saved' });
+  const editErr = errEl();
+  const saved = savedEl();
   const f = h('form', { class: 'stack' },
     h('label', { class: 'field' }, h('span', {}, 'Label'), h('input', { name: 'label', value: x.label })),
     h('div', { class: 'field' }, h('span', {}, 'Change expiry'), exp.el),
@@ -756,9 +786,9 @@ async function openSharePanel(id) {
       x.state !== 'active' && x.state !== 'missing' ? h('button', { class: 'btn', onclick: async () => { await api('/api/shares/' + id, { method: 'PATCH', body: { revoked: false, reset_count: x.state === 'used-up' } }); changed(); } }, x.state === 'used-up' ? 'Reset download count' : 'Turn back on') : null,
       h('button', { class: 'btn danger', onclick: async ev => {
         const b = ev.currentTarget;
-        if (b.dataset.armed) { await api('/api/shares/' + id + (purge && purge.querySelector('input').checked ? '?purge=1' : ''), { method: 'DELETE' }); nav({ share: '' }, true); return; }
-        b.dataset.armed = '1'; b.textContent = `Delete “${x.label || x.id}”`;
-        if (purge) purge.hidden = false;
+        if (!armOnce(b, `Delete “${x.label || x.id}”`)) { if (purge) purge.hidden = false; return; }
+        await api('/api/shares/' + id + (purge && purge.querySelector('input').checked ? '?purge=1' : ''), { method: 'DELETE' });
+        nav({ share: '' }, true);
       } }, 'Delete link'), purge),
     h('h3', {}, 'Activity'),
     events.length ? h('table', { class: 'files' }, h('tbody', {}, events.map(ev => h('tr', {},
@@ -771,7 +801,7 @@ const EVENT_TEXT = { view: 'Opened', download: 'Downloaded', zip: 'Downloaded .z
 async function openDropPanel() {
   const st = await settings();
   const exp = expiryControl(st.default_expiry_hours);
-  const err = h('p', { class: 'err' });
+  const err = errEl();
   const f = h('form', { class: 'stack' },
     h('label', { class: 'field' }, h('span', {}, 'Name', info('Also the folder name the uploads are saved in, inside the drop folder.')), h('input', { name: 'label', required: true, placeholder: 'Photos from Mom' })),
     h('div', { class: 'field' }, h('span', {}, 'Expires'), exp.el),
@@ -781,11 +811,14 @@ async function openDropPanel() {
     h('button', { class: 'btn primary', type: 'submit' }, 'Create file drop'));
   f.addEventListener('submit', async ev => {
     ev.preventDefault();
+    const b = f.querySelector('button[type=submit]');
+    if (b.disabled) return;
+    b.disabled = true;
     try {
       const s = await api('/api/shares', { method: 'POST', body: { mode: 'drop', label: f.label.value, password: f.pw.value, note: f.note.value, ...exp.read() } });
       copy(s.url);
       nav({ tab: '', share: s.id });
-    } catch (x) { err.textContent = x.message; }
+    } catch (x) { err.textContent = x.message; } finally { b.disabled = false; }
   });
   panelShell('New file drop', f);
   f.label.focus();
@@ -807,7 +840,7 @@ async function viewActivity(s, seq) {
       h('tbody', {}, ev.map(e => h('tr', { onclick: () => nav({ view: 'shares', share: e.share, tab: 'all' }) },
         h('td', { class: 'num muted' }, fmtDate(e.ts)),
         h('td', {}, EVENT_TEXT[e.kind] || e.kind, e.detail ? h('span', { class: 'where' }, e.detail) : null),
-        h('td', { class: 'mono' }, e.share),
+        h('td', { class: 'mono' }, h('a', { href: '?view=shares&share=' + e.share + '&tab=all', onclick: ev => { ev.preventDefault(); ev.stopPropagation(); nav({ view: 'shares', share: e.share, tab: 'all' }); } }, e.share)),
         h('td', { class: 'r mono muted hide-s', title: e.ua }, e.ip))))));
     return;
   }
@@ -827,7 +860,9 @@ async function viewActivity(s, seq) {
   put($('#content'), h('table', { class: 'files' },
     h('thead', {}, h('tr', {}, h('th', {}, 'Item'), h('th', {}, 'Change'), h('th', { class: 'r' }, 'Size'), h('th', { class: 'r hide-s' }, 'When'))),
     h('tbody', {}, rows.map(c => h('tr', { onclick: () => c.kind !== 'deleted' && nav({ view: 'browse', path: parentOf(c.path), sel: c.path, tab: '', sort: '', kind: '', within: '' }) },
-      h('td', { class: 'name' }, h('span', {}, icon(c.dir ? 'folder' : 'file', c.dir ? 'k-folder' : ''), h('span', { class: 'label' }, c.path.split('/').pop())), h('span', { class: 'where' }, parentOf(c.path))),
+      h('td', { class: 'name' }, h('span', {}, icon(c.dir ? 'folder' : 'file', c.dir ? 'k-folder' : ''),
+        c.kind === 'deleted' ? h('span', { class: 'label' }, c.path.split('/').pop())
+          : h('a', { class: 'label', href: '?path=' + encodeURIComponent(parentOf(c.path)) + '&sel=' + encodeURIComponent(c.path), onclick: ev => { ev.preventDefault(); ev.stopPropagation(); nav({ view: 'browse', path: parentOf(c.path), sel: c.path, tab: '', sort: '', kind: '', within: '' }); } }, c.path.split('/').pop())), h('span', { class: 'where' }, parentOf(c.path))),
       h('td', { class: c.kind === 'deleted' ? 'err' : '' }, verb[c.kind]),
       h('td', { class: 'r num muted' }, c.dir || c.kind === 'deleted' ? '' : fmtSize(c.size)),
       h('td', { class: 'r num muted hide-s' }, fmtDate(c.ts)))))));
@@ -841,7 +876,7 @@ async function viewOverview(s, seq) {
   CURRENT = [];
   const ix = st.status;
   put($('#sub'), h('b', {}, 'Overview'), h('span', { class: 'grow' }),
-    ME.admin ? h('button', { class: 'btn', onclick: async e => { await api('/api/rescan', { method: 'POST' }); e.currentTarget.textContent = 'Rescan started'; } }, 'Rescan now') : null);
+    ME.admin ? h('button', { class: 'btn', onclick: async e => { const b = e.currentTarget; b.disabled = true; await api('/api/rescan', { method: 'POST' }); b.textContent = 'Rescan started'; } }, 'Rescan now') : null);
   const sum = k => st.by_root.reduce((a, r) => a + r[k], 0); // non-admins: totals of the folders they can read
   const bars = (rows, label) => {
     const max = Math.max(1, ...rows.map(r => r.bytes));
@@ -894,7 +929,7 @@ async function viewUsers(s, seq) {
   put($('#content'), h('table', { class: 'files' },
     h('thead', {}, h('tr', {}, h('th', {}, 'User'), h('th', {}, 'Role'), h('th', { class: 'hide-s' }, 'Two-factor'), h('th', {}, 'State'))),
     h('tbody', {}, users.map(u => h('tr', { 'aria-selected': s.user === String(u.id) ? 'true' : 'false', onclick: () => nav({ user: String(u.id), tab: '' }, true) },
-      h('td', { class: 'name' }, h('span', {}, icon('user'), h('span', { class: 'label' }, u.username)), h('span', { class: 'where' }, accessSummary(u))),
+      h('td', { class: 'name' }, h('span', {}, icon('user'), h('a', { class: 'label', href: '?view=users&user=' + u.id, onclick: ev => { ev.preventDefault(); ev.stopPropagation(); nav({ user: String(u.id), tab: '' }, true); } }, u.username)), h('span', { class: 'where' }, accessSummary(u))),
       h('td', {}, u.admin ? 'Admin' : 'User'),
       h('td', { class: 'hide-s muted' }, u.two_factor ? 'On' : 'Off'),
       h('td', {}, h('span', { class: 'state ' + (u.disabled ? 'revoked' : 'active') }, u.disabled ? 'Turned off' : 'Active')))))));
@@ -953,8 +988,8 @@ async function openUserPanel(id) {
     try { u = (await api('/api/users')).find(x => String(x.id) === String(id)); } catch { u = null; }
     if (!u) { panelShell('User not found', h('p', { class: 'muted' }, 'It may have been deleted.')); return; }
   }
-  const err = h('p', { class: 'err' });
-  const saved = h('span', { class: 'saved' });
+  const err = errEl();
+  const saved = savedEl();
   const grants = grantsEditor(u.grants);
   const role = h('select', { name: 'role' }, h('option', { value: 'user' }, 'User'), h('option', { value: 'admin' }, 'Admin'));
   role.value = u.admin ? 'admin' : 'user';
@@ -972,6 +1007,9 @@ async function openUserPanel(id) {
   f.addEventListener('submit', async ev => {
     ev.preventDefault();
     err.textContent = ''; saved.textContent = '';
+    const b = f.querySelector('button[type=submit]');
+    if (b.disabled) return;
+    b.disabled = true;
     const body = { admin: role.value === 'admin', grants: grants.read() };
     try {
       if (isNew) {
@@ -985,9 +1023,9 @@ async function openUserPanel(id) {
       f.pw.value = '';
       saved.textContent = 'Saved ' + new Date().toLocaleTimeString('en-US', { hour12: false });
       viewUsers(getState(), routeSeq);
-    } catch (x) { err.textContent = x.message; }
+    } catch (x) { err.textContent = x.message; } finally { b.disabled = false; }
   });
-  const actErr = h('p', { class: 'err' });
+  const actErr = errEl();
   const account = isNew ? null : [
     h('h3', {}, 'Account'),
     h('dl', { class: 'facts' }, h('dt', {}, 'Created'), h('dd', {}, fullDate(u.created)), h('dt', {}, 'Two-factor'), h('dd', {}, u.two_factor ? 'On' : 'Off')),
@@ -999,7 +1037,7 @@ async function openUserPanel(id) {
       } }, 'Turn off two-factor') : null,
       u.username !== ME.user ? h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
         const b = ev.currentTarget;
-        if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = `Delete ${u.username}`; return; }
+        if (!armOnce(b, `Delete ${u.username}`)) return;
         try { await api('/api/users/' + u.id, { method: 'DELETE' }); nav({ user: '' }); } catch (x) { actErr.textContent = x.message; }
       } }, 'Delete user') : null,
       u.username !== ME.user ? info('Deleting turns off every link this user made. Files are never touched.') : null),
@@ -1051,8 +1089,8 @@ function tokenPanel(tok, tools, mcpURL, changed) {
   const isNew = !tok;
   const sc = isNew ? { tools: {}, folders: [], api: false } : { ...tok.scope, tools: { ...tok.scope.tools } };
   if (isNew) tools.forEach(t => { if (t.group === 'read' || t.group === 'share') sc.tools[t.name] = 'ask'; });
-  const err = h('p', { class: 'err' });
-  const saved = h('span', { class: 'saved' });
+  const err = errEl();
+  const saved = savedEl();
   const name = h('input', { name: 'name', value: isNew ? '' : tok.name, placeholder: 'e.g. Claude Code', required: true, autocomplete: 'off' });
 
   const redraw = {};
@@ -1157,8 +1195,8 @@ async function viewSettings(s, seq) {
   CURRENT = [];
   put($('#sub'), h('b', {}, 'Settings'));
   const section = (title, help, body, save) => {
-    const saved = h('span', { class: 'saved' });
-    const err = h('span', { class: 'err' });
+    const saved = savedEl();
+    const err = errEl('span');
     const f = h('form', { class: 'stack' }, body, save ? h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save'), saved, err) : null);
     f.addEventListener('submit', e => e.preventDefault());
     if (save) f.addEventListener('submit', async e => {
@@ -1219,7 +1257,7 @@ async function viewSettings(s, seq) {
 
 function twoFactorSection(st) {
   const box = h('div', { class: 'stack' });
-  const err = h('p', { class: 'err' });
+  const err = errEl();
   if (st.two_factor) {
     const f = h('form', { class: 'stack' },
       h('p', {}, `On. ${st.recovery_left} recovery code${st.recovery_left === 1 ? '' : 's'} left.`),
@@ -1282,7 +1320,7 @@ function devicesList(all, keep = () => true) {
       h('td', { class: 'muted hide-s' }, 'Paired ' + fmtDate(d.created)),
       h('td', { class: 'r' }, h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
         const b = ev.currentTarget;
-        if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Remove ' + d.name; return; }
+        if (!armOnce(b, 'Remove ' + d.name)) return;
         try { await api('/api/devices/' + d.id, { method: 'DELETE' }); load(); } catch (x) { b.textContent = x.message; }
       } }, 'Remove')))))));
   };
@@ -1360,22 +1398,26 @@ async function uploadFiles(dir, files) {
     const d = x instanceof File ? dir : x.dir;
     const bar = h('progress', { max: f.size || 1, value: 0 });
     const st = h('span', { class: 'muted' }, 'Waiting');
-    list.append(h('li', {}, h('span', { class: 'label' }, d === dir ? f.name : d.slice(dir.length + 1) + '/' + f.name), bar, st));
-    return { f, dir: d, bar, st };
+    const ctl = { aborted: false, ac: null };
+    list.append(h('li', {}, h('span', { class: 'label' }, d === dir ? f.name : d.slice(dir.length + 1) + '/' + f.name), bar, st,
+      h('button', { class: 'iconbtn', 'aria-label': 'Cancel', onclick: () => { ctl.aborted = true; ctl.ac?.abort(); } }, icon('x'))));
+    return { f, dir: d, bar, st, ctl };
   });
-  for (const { f, dir, bar, st } of rows) {
+  for (const { f, dir, bar, st, ctl } of rows) {
+    if (ctl.aborted) { st.textContent = 'Cancelled'; continue; }
     try {
       st.textContent = 'Sending';
       const up = await api('/api/uploads', { method: 'POST', body: { dir, name: f.name, size: f.size, mtime: f.lastModified } });
       let off = 0, tries = 0;
       while (off < f.size) {
         try {
-          const r = await fetch(`/api/uploads/${up.id}?offset=${off}`, { method: 'PUT', headers: { 'X-Burrow': '1' }, body: f.slice(off, Math.min(off + CHUNK, f.size)) });
+          const r = await fetch(`/api/uploads/${up.id}?offset=${off}`, { method: 'PUT', headers: { 'X-Burrow': '1' }, body: f.slice(off, Math.min(off + CHUNK, f.size)), signal: (ctl.ac = new AbortController()).signal });
           const d = await r.json().catch(() => ({}));
           if (r.status === 409 && d.offset != null) { off = d.offset; continue; }
           if (!r.ok) throw Object.assign(new Error(d.error || `Upload failed (${r.status})`), { final: true });
           off = d.offset; bar.value = off; tries = 0;
         } catch (x) {
+          if (x.name === 'AbortError' || ctl.aborted) throw Object.assign(new Error('Cancelled'), { final: true, cancelled: true, up });
           // a dropped connection: ask where the upload got to and carry on
           if (x.final || ++tries > 5) throw x;
           await new Promise(r => setTimeout(r, 1500 * tries));
@@ -1385,7 +1427,10 @@ async function uploadFiles(dir, files) {
       const done = await api(`/api/uploads/${up.id}/finish`, { method: 'POST', body: {} });
       bar.value = f.size || 1;
       st.textContent = done.name !== f.name ? `Saved as ${done.name}` : 'Done';
-    } catch (x) { st.textContent = x.message; st.className = 'err'; }
+    } catch (x) {
+      if (x.cancelled) { if (x.up) api('/api/uploads/' + x.up.id, { method: 'DELETE' }).catch(() => {}); st.textContent = 'Cancelled'; }
+      else { st.textContent = x.message; st.className = 'err'; }
+    }
   }
   route();
 }
@@ -1544,7 +1589,7 @@ function remotesEditor() {
       h('td', { class: r.error ? 'err' : 'muted' }, r.error || 'Connected'),
       h('td', { class: 'r' }, h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
         const b = ev.currentTarget;
-        if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Remove ' + r.name; return; }
+        if (!armOnce(b, 'Remove ' + r.name)) return;
         await api('/api/remotes/' + r.id, { method: 'DELETE' }); load(); loadNav();
       } }, 'Remove')))))) : h('p', { class: 'muted' }, 'Nothing connected.'));
   };
@@ -1567,7 +1612,7 @@ function remotesEditor() {
     field('Address', { name: 'url', placeholder: 'https://burrow.example.com', inputmode: 'url', class: 'mono' }),
     field('API token', { name: 'token', type: 'password', autocomplete: 'off' }, 'Make one on that Burrow in Settings, MCP and API tokens, with API access on. It decides which of its folders this one reaches.'),
     field('Certificate fingerprint', { name: 'pin', class: 'mono', placeholder: 'Only for a self-signed certificate' }, 'The SHA-256 fingerprint that Burrow prints in its log at startup.'));
-  const err = h('span', { class: 'err' });
+  const err = errEl('span');
   const f = h('form', { class: 'stack' },
     h('div', { class: 'grid2' }, field('Name', { name: 'name', required: true, placeholder: 'Office NAS' }, 'The library name people see. It can\u2019t be changed later.'), h('label', { class: 'field' }, h('span', {}, 'Kind'), kind)),
     smb, bur, field('Start in folder', { name: 'folder', placeholder: 'Optional, e.g. Projects/2026', class: 'mono' }),
@@ -1590,7 +1635,7 @@ function newFolderControl(dir) {
   const wrap = h('span', { class: 'row' });
   const btn = h('button', { class: 'btn', type: 'button', onclick: () => {
     const input = h('input', { placeholder: 'Folder name', 'aria-label': 'New folder name', autocomplete: 'off' });
-    const err = h('span', { class: 'err' });
+    const err = errEl('span');
     const go = async () => {
       if (!input.value.trim()) return;
       try { const e = await api('/api/fs/mkdir', { method: 'POST', body: { path: dir + '/' + input.value.trim() } }); nav({ path: e.path, sel: '' }); } catch (x) { err.textContent = x.message; }
@@ -1607,7 +1652,7 @@ function renameControl(e) {
   const wrap = h('span', { class: 'row' });
   const btn = h('button', { class: 'btn', type: 'button', onclick: () => {
     const input = h('input', { value: e.name, 'aria-label': 'New name', autocomplete: 'off', spellcheck: 'false' });
-    const err = h('span', { class: 'err' });
+    const err = errEl('span');
     const go = async () => {
       const name = input.value.trim();
       if (!name || name === e.name) { wrap.replaceChildren(btn); return; }
@@ -1626,11 +1671,54 @@ function renameControl(e) {
   return wrap;
 }
 
+function moveControl(e) {
+  const wrap = h('span', { class: 'row' });
+  const btn = h('button', { class: 'btn', type: 'button', onclick: () => {
+    const options = h('datalist', { id: 'move-options' });
+    let t = null;
+    const input = h('input', { list: 'move-options', class: 'mono', placeholder: 'Folder, e.g. DOCUMENTS/Taxes', 'aria-label': 'Move to folder', autocomplete: 'off', spellcheck: 'false',
+      oninput: ev => { clearTimeout(t); t = setTimeout(() => folderSuggest(options, ev.target.value.trim()), 150); }, onfocus: ev => folderSuggest(options, ev.target.value.trim()) });
+    const err = errEl('span');
+    const go = () => {
+      const dest = input.value.trim();
+      if (!dest) return;
+      if (!canMove(e.path, dest)) { err.textContent = 'It’s already there, or that’s inside it.'; return; }
+      moveInto(e.path, dest);
+      panelFor = '';
+      nav({ sel: '' }, true);
+    };
+    input.addEventListener('keydown', ev => { if (ev.key === 'Enter') go(); if (ev.key === 'Escape') wrap.replaceChildren(btn); });
+    wrap.replaceChildren(input, options, h('button', { class: 'btn primary', type: 'button', onclick: go }, 'Move'), h('button', { class: 'btn', type: 'button', onclick: () => wrap.replaceChildren(btn) }, 'Cancel'), err);
+    input.focus();
+  } }, icon('folder'), 'Move');
+  wrap.append(btn);
+  return wrap;
+}
+
+// armOnce arms a danger button: the first click swaps its label for a confirmation
+// and returns false; a second click within 4 s (without leaving the button) returns true.
+function armOnce(b, label) {
+  if (b.dataset.armed) return true;
+  b.dataset.armed = '1';
+  const old = [...b.childNodes];
+  const span = b.lastChild.nodeType === 3 || !b.querySelector('span') ? null : b.lastChild;
+  const oldText = span ? span.textContent : null;
+  if (span) span.textContent = label; else b.textContent = label;
+  const reset = () => {
+    if (!b.isConnected || !b.dataset.armed) return;
+    delete b.dataset.armed;
+    if (span) span.textContent = oldText; else b.replaceChildren(...old);
+  };
+  b.addEventListener('blur', reset, { once: true });
+  setTimeout(reset, 4000);
+  return false;
+}
+
 function deleteControl(e) {
-  const err = h('span', { class: 'err' });
+  const err = errEl('span');
   return h('span', { class: 'row' }, h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
     const b = ev.currentTarget;
-    if (!b.dataset.armed) { b.dataset.armed = '1'; b.lastChild.textContent = 'Move to trash'; return; }
+    if (!armOnce(b, 'Move to trash')) return;
     try {
       const [r] = await api('/api/fs/delete', { method: 'POST', body: { paths: [e.path] } });
       if (!r.ok) throw new Error(r.error);
@@ -1662,7 +1750,7 @@ async function viewTrash(s, seq) {
         } }, 'Restore'),
         h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
           const b = ev.currentTarget;
-          if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Delete forever'; return; }
+          if (!armOnce(b, 'Delete forever')) return;
           try { await api('/api/trash/' + t.id, { method: 'DELETE' }); route(); } catch (x) { err.textContent = x.message; }
         } }, 'Delete'))))))));
 }

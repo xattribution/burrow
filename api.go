@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -455,6 +456,9 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "missing UI", 500)
 		return
+	}
+	for _, n := range []string{"base.css", "app.css", "app.js"} {
+		b = bytes.ReplaceAll(b, []byte("/assets/"+n+"\""), []byte("/assets/"+n+"?v="+version+"\""))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")

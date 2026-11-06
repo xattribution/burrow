@@ -6,8 +6,8 @@
 <meta name="robots" content="noindex, nofollow">
 <title>{{if .Title}}{{.Title}}{{else}}Shared files{{end}}</title>
 <link rel="icon" href="/favicon.svg">
-<link rel="stylesheet" href="/assets/base.css">
-<link rel="stylesheet" href="/assets/share.css">
+<link rel="stylesheet" href="/assets/base.css?v={{v}}">
+<link rel="stylesheet" href="/assets/share.css?v={{v}}">
 </head>
 <body>
 <main class="share">
@@ -37,6 +37,7 @@
   <form method="post" action="/s/{{.S.ID}}/auth" class="pw">
     <label for="pw">Password</label>
     <input id="pw" name="password" type="password" autocomplete="current-password" required autofocus>
+    {{if .Sub}}<input type="hidden" name="p" value="{{.Sub}}">{{end}}
     {{if .PWError}}<p class="err">That password is wrong.</p>{{end}}
     <button class="btn primary" type="submit">Open</button>
   </form>
@@ -70,6 +71,7 @@
       {{else if eq .Preview "video"}}<video src="/s/{{.S.ID}}/raw{{if $p}}?p={{$p}}{{end}}" controls preload="metadata" playsinline></video>
       {{else if eq .Preview "audio"}}<audio src="/s/{{.S.ID}}/raw{{if $p}}?p={{$p}}{{end}}" controls preload="metadata"></audio>
       {{else if eq .Preview "pdf"}}<iframe src="/s/{{.S.ID}}/raw{{if $p}}?p={{$p}}{{end}}" title="{{.File.Name}}"></iframe>
+      {{else if eq .Preview "text"}}<iframe src="/s/{{.S.ID}}/raw{{if $p}}?p={{$p}}{{end}}" title="{{.File.Name}}"></iframe>
       {{end}}
     </div>
     <p class="actions">
@@ -89,7 +91,7 @@
         <tr>
           <td class="name">
             {{if .IsDir}}<a href="/s/{{$.S.ID}}?p={{$sub}}"><svg class="icon k-folder" viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>{{.Name}}</a>
-            {{else}}<a href="/s/{{$.S.ID}}?p={{$sub}}">{{if eq .Kind "image"}}<img class="th" loading="lazy" src="/s/{{$.S.ID}}/thumb?p={{$sub}}" alt="">{{else}}<svg class="icon" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>{{end}}{{.Name}}</a>{{end}}
+            {{else}}<a href="/s/{{$.S.ID}}?p={{$sub}}">{{if thumbable .}}<img class="th" loading="lazy" src="/s/{{$.S.ID}}/thumb?p={{$sub}}" alt="">{{else}}<svg class="icon" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>{{end}}{{.Name}}</a>{{end}}
           </td>
           <td class="r num">{{if not .IsDir}}{{size .Size}}{{end}}</td>
           <td class="r num hide-s">{{date .Mtime}}</td>
@@ -117,6 +119,6 @@
   {{if .S.Expires}}<p class="foot muted">This link works until {{date .S.Expires}}.</p>{{end}}
 {{end}}
 </main>
-<script src="/assets/share.js"></script>
+<script src="/assets/share.js?v={{v}}"></script>
 </body>
 </html>

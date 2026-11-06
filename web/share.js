@@ -43,17 +43,22 @@
     for (const f of ok) {
       const fd = new FormData();
       fd.append('files', f, f.name);
-      const good = await new Promise(res => {
+      const x = await new Promise(res => {
         const x = new XMLHttpRequest();
         x.open('POST', form.action);
         x.setRequestHeader('Accept', 'application/json');
         x.upload.onprogress = ev => { if (ev.lengthComputable) f._bar.value = ev.loaded / ev.total; };
-        x.onload = () => res(x.status === 200);
-        x.onerror = () => res(false);
+        x.onload = () => res(x);
+        x.onerror = () => res(null);
         x.send(fd);
       });
+      const good = x && x.status === 200;
+      let msg = 'failed, try again';
+      if (x && !good) {
+        try { msg = JSON.parse(x.responseText).error || msg; } catch { if (x.status === 410 || x.status === 404) msg = 'this link no longer works'; }
+      }
       f._bar.value = good ? 1 : 0;
-      f._size.textContent = good ? 'sent' : 'failed, try again';
+      f._size.textContent = good ? 'sent' : msg;
       f._size.className = good ? 'done' : 'err';
       if (good) sent++;
     }
