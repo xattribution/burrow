@@ -33,7 +33,7 @@ var thumbExts = map[string]bool{"jpg": true, "jpeg": true, "png": true, "gif": t
 // The cache key changes when the file does, and browsers revalidate with the ETag.
 func (a *App) serveThumb(w http.ResponseWriter, r *http.Request, abs string, info os.FileInfo) {
 	ext := extOf(info.Name())
-	if info.IsDir() || !thumbExts[ext] || info.Size() > 200<<20 {
+	if info.IsDir() || !info.Mode().IsRegular() || !thumbExts[ext] || info.Size() > 200<<20 {
 		http.NotFound(w, r)
 		return
 	}
@@ -129,7 +129,7 @@ func (a *App) thumbFrom(f io.ReadSeeker, name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width*cfg.Height > 60_000_000 {
+	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > 30000 || cfg.Height > 30000 || int64(cfg.Width)*int64(cfg.Height) > 60_000_000 {
 		return nil, fmt.Errorf("image too large")
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
@@ -178,7 +178,7 @@ func exifOrientation(b []byte) int {
 		}
 		marker := b[i+1]
 		size := int(binary.BigEndian.Uint16(b[i+2:]))
-		if marker == 0xE1 && i+4+size <= len(b) && size > 14 && string(b[i+4:i+10]) == "Exif\x00\x00" {
+		if marker == 0xE1 && i+4+size <= len(b) && size >= 16 && string(b[i+4:i+10]) == "Exif\x00\x00" {
 			t := b[i+10 : i+2+size]
 			var bo binary.ByteOrder
 			switch string(t[:2]) {

@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net/http"
 	"os"
@@ -168,8 +170,13 @@ func (a *App) handleMCP(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "POST JSON-RPC messages to this endpoint")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			httpErr(w, http.StatusRequestEntityTooLarge, "request too large (1 MB max)")
+			return
+		}
 		httpErr(w, 400, "bad body")
 		return
 	}
@@ -263,7 +270,7 @@ func (a *App) mcpDispatch(r *http.Request, q rpcReq) (rpcResp, bool) {
 		}
 		out, err := a.mcpCall(r, p.Name, p.Arguments)
 		if err != nil {
-			resp.Result = map[string]any{"content": []any{map[string]any{"type": "text", "text": "Error: " + err.Error()}}, "isError": true}
+			resp.Result = map[string]any{"content": []any{map[string]any{"type": "text", "text": "Error: " + pubErr(err).Error()}}, "isError": true}
 			break
 		}
 		b, _ := json.MarshalIndent(out, "", " ")
@@ -272,6 +279,15 @@ func (a *App) mcpDispatch(r *http.Request, q rpcReq) (rpcResp, bool) {
 		resp.Error = &rpcErr{-32601, "method not found: " + q.Method}
 	}
 	return resp, true
+}
+
+// pubErr keeps OS errors from echoing server-internal absolute paths to clients.
+func pubErr(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return fmt.Errorf("%s: %s", pe.Op, pe.Err)
+	}
+	return err
 }
 
 // structuredContent must be a JSON object.
@@ -409,6 +425,16 @@ func (a *App) mcpCall(r *http.Request, name string, args map[string]any) (any, e
 		if err != nil {
 			return nil, err
 		}
+		st, err := os.Lstat(abs)
+		if err != nil {
+			return nil, errors.New("not found")
+		}
+		if st.IsDir() {
+			return nil, fmt.Errorf("that is a folder")
+		}
+		if !st.Mode().IsRegular() {
+			return nil, fmt.Errorf("not a readable file")
+		}
 		kb := argF(args, "max_kb")
 		if kb <= 0 {
 			kb = 64
@@ -416,15 +442,11 @@ func (a *App) mcpCall(r *http.Request, name string, args map[string]any) (any, e
 		if kb > 512 {
 			kb = 512
 		}
-		f, err := os.Open(abs)
+		f, err := a.openNoFollow(abs)
 		if err != nil {
 			return nil, err
 		}
 		defer f.Close()
-		st, _ := f.Stat()
-		if st.IsDir() {
-			return nil, fmt.Errorf("that is a folder")
-		}
 		buf := make([]byte, int(kb*1024))
 		n, _ := io.ReadFull(f, buf)
 		buf = buf[:n]
@@ -503,7 +525,8 @@ func (a *App) mcpCall(r *http.Request, name string, args map[string]any) (any, e
 		} else {
 			_, _ = a.st.exec(`DELETE FROM share_items WHERE share_id=? AND path=?`, s.ID, cleanRel(argS(args, "path")))
 		}
-		return map[string]any{"id": s.ID, "items": a.itemPaths(s.ID)}, nil
+		items, _ := a.itemPaths(s.ID)
+		return map[string]any{"id": s.ID, "items": items}, nil
 
 	case "list_share_links":
 		active, _ := args["active_only"].(bool)

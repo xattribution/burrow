@@ -769,6 +769,24 @@ func TestLastAdminRace(t *testing.T) {
 	}
 }
 
+func TestExifOrientationHostileInput(t *testing.T) {
+	// APP1 segment of size 15 passes the old `size > 14` guard but leaves a
+	// 7-byte TIFF slice, so reading the IFD offset panicked (index out of range).
+	crafted := append([]byte{0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x0F}, "Exif\x00\x00II"...)
+	crafted = append(crafted, make([]byte, 21-len(crafted))...)
+	if got := exifOrientation(crafted); got != 1 {
+		t.Fatalf("crafted APP1: got %d, want 1", got)
+	}
+	valid := append([]byte{0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x1E}, "Exif\x00\x00II"...)
+	valid = append(valid, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00) // TIFF magic, IFD at offset 8
+	valid = append(valid, 0x01, 0x00)                         // one entry
+	valid = append(valid, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00)
+	valid = append(valid, 0xFF, 0xD9)
+	if got := exifOrientation(valid); got != 6 {
+		t.Fatalf("valid EXIF: got %d, want 6", got)
+	}
+}
+
 func TestSecretsOnDiskArePrivate(t *testing.T) {
 	e := setup(t)
 	fi, err := os.Stat(filepath.Join(e.app.cfg.StateDir, "t.db"))

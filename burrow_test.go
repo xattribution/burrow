@@ -521,3 +521,109 @@ func rangeGet(t *testing.T, c *http.Client, u, rg string) int {
 	r.Body.Close()
 	return r.StatusCode
 }
+
+// TestDownloadLimitPerFileOnFolderShare: on a limited folder link each browser
+// counts once per file; fetching a second file must not revoke the first file's
+// free re-fetch.
+func TestDownloadLimitPerFileOnFolderShare(t *testing.T) {
+	e := setup(t)
+	var s Share
+	_ = json.Unmarshal(e.do("POST", "/api/shares", map[string]any{"path": "PROJECTS/lamp", "max_downloads": 3}, 200), &s)
+	jar, _ := cookiejar.New(nil)
+	c := &http.Client{Jar: jar}
+	raw := e.srv.URL + "/s/" + s.ID + "/raw?p="
+	count := func() int64 { g, _ := e.app.getShare(s.ID); return g.DL }
+	if code := rangeGet(t, c, raw+"shade.stl", ""); code != 200 || count() != 1 {
+		t.Fatalf("first file: %d, count %d", code, count())
+	}
+	if code := rangeGet(t, c, raw+url.QueryEscape("sub/inner.txt"), ""); code != 200 || count() != 2 {
+		t.Fatalf("second file: %d, count %d", code, count())
+	}
+	if code := rangeGet(t, c, raw+"shade.stl", ""); code != 200 || count() != 2 {
+		t.Fatalf("first file again: %d, count %d", code, count())
+	}
+}
+
+// TestPatchShareLifecycle: reset_count and max_downloads revive a used-up link,
+// expires_hours -1 clears the expiry, and expires_hours 0 leaves it unchanged.
+func TestPatchShareLifecycle(t *testing.T) {
+	e := setup(t)
+	var s Share
+	_ = json.Unmarshal(e.do("POST", "/api/shares", map[string]any{"path": "DOCS/notes.txt", "max_downloads": 1}, 200), &s)
+	newBrowser := func() *http.Client { jar, _ := cookiejar.New(nil); return &http.Client{Jar: jar} }
+	dl := e.srv.URL + "/s/" + s.ID + "/dl"
+	if code := rangeGet(t, newBrowser(), dl, ""); code != 200 {
+		t.Fatalf("first download: %d", code)
+	}
+	if code := rangeGet(t, newBrowser(), dl, ""); code != 410 {
+		t.Fatalf("limit not enforced: %d", code)
+	}
+	e.do("PATCH", "/api/shares/"+s.ID, map[string]any{"reset_count": true, "max_downloads": 5}, 200)
+	if code := rangeGet(t, newBrowser(), dl, ""); code != 200 {
+		t.Fatalf("after reset: %d", code)
+	}
+	g, _ := e.app.getShare(s.ID)
+	if g.DL != 1 || g.MaxDL != 5 {
+		t.Fatalf("after reset: dl %d max %d", g.DL, g.MaxDL)
+	}
+	e.do("PATCH", "/api/shares/"+s.ID, map[string]any{"expires_hours": -1}, 200)
+	if g, _ = e.app.getShare(s.ID); g.Expires != 0 {
+		t.Fatalf("expires not cleared: %d", g.Expires)
+	}
+	if code := rangeGet(t, newBrowser(), dl, ""); code != 200 {
+		t.Fatalf("after clearing expiry: %d", code)
+	}
+	e.do("PATCH", "/api/shares/"+s.ID, map[string]any{"expires_hours": 0}, 200)
+	if g, _ = e.app.getShare(s.ID); g.Expires != 0 {
+		t.Fatalf("expires_hours 0 changed expiry: %d", g.Expires)
+	}
+	if code := rangeGet(t, newBrowser(), dl, ""); code != 200 {
+		t.Fatalf("after expires_hours 0: %d", code)
+	}
+}
+
+// TestBackupRoundTripWhileRunning: `burrow backup` runs VACUUM INTO on the live
+// WAL-mode database; the copy must reopen through openStore (schema + migrations)
+// with users, shares and the signing secret intact.
+func TestBackupRoundTripWhileRunning(t *testing.T) {
+	e := setup(t)
+	var s Share
+	_ = json.Unmarshal(e.do("POST", "/api/shares", map[string]any{"path": "DOCS/notes.txt"}, 200), &s)
+	e.mkUser("bob", false, Grant{Path: "DOCS", Read: true})
+	dest := filepath.Join(t.TempDir(), "backup.db")
+	if _, err := e.app.st.db.Exec(`VACUUM INTO ?`, dest); err != nil {
+		t.Fatal(err)
+	}
+	st2, err := openStore(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app2, err := newApp(e.app.cfg, st2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv2 := httptest.NewServer(app2.routes())
+	t.Cleanup(srv2.Close)
+	for _, cred := range [][2]string{{"admin", "longenough1"}, {"bob", "longenough-bob"}} {
+		b, _ := json.Marshal(map[string]string{"user": cred[0], "password": cred[1]})
+		r, err := postJSON(srv2.URL+"/api/login", b)
+		if err != nil {
+			t.Fatalf("%s login on restored copy: %v", cred[0], err)
+		}
+		if r.StatusCode != 200 {
+			t.Fatalf("%s login on restored copy: %d", cred[0], r.StatusCode)
+		}
+	}
+	r, err := http.Get(srv2.URL + "/s/" + s.ID + "/raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	if r.StatusCode != 200 || string(body) != "hello notes" {
+		t.Fatalf("restored share: %d %q", r.StatusCode, body)
+	}
+	if st2.get("secret") != e.app.st.get("secret") {
+		t.Fatal("signing secret changed across backup/restore")
+	}
+}

@@ -124,10 +124,10 @@ func (a *App) addItems(owner *User, id string, paths []string, by *User) error {
 	return nil
 }
 
-func (a *App) itemPaths(id string) []string {
+func (a *App) itemPaths(id string) ([]string, error) {
 	rows, err := a.st.db.Query(`SELECT path FROM share_items WHERE share_id=? ORDER BY added, path`, id)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	var out []string
@@ -136,7 +136,7 @@ func (a *App) itemPaths(id string) []string {
 		_ = rows.Scan(&p)
 		out = append(out, p)
 	}
-	return out
+	return out, rows.Err()
 }
 
 // sources lists what sits at the collection root, with unique display names.
@@ -158,7 +158,8 @@ func (a *App) sources(s Share, owner *User) []collSource {
 		c.Name = n
 		out = append(out, c)
 	}
-	for _, p := range a.itemPaths(s.ID) {
+	items, _ := a.itemPaths(s.ID)
+	for _, p := range items {
 		abs, rel, err := a.resolve(p)
 		if err != nil || !owner.can(rel, permShare) {
 			continue
@@ -354,7 +355,8 @@ type CollItem struct {
 func (a *App) collectionView(s Share) CollectionView {
 	v := CollectionView{Items: []CollItem{}, Uploads: []Entry{}, Folder: "drop/" + s.Path}
 	owner := a.shareOwner(s)
-	for _, p := range a.itemPaths(s.ID) {
+	items, _ := a.itemPaths(s.ID)
+	for _, p := range items {
 		abs, rel, err := a.resolve(p)
 		if err == nil && !owner.can(rel, permShare) {
 			err = errNotAllowed // the owner lost access: recipients no longer see it
@@ -593,8 +595,9 @@ func (a *App) checkSpace(incoming int64) error {
 	return nil
 }
 
-// cleanPartials removes upload leftovers older than a day (from a crash mid-upload).
-// Upload folders sit directly under /drop, so this only looks one level deep.
+// cleanPartials removes leftovers older than a day from a crash mid-upload or
+// mid-copy: partial uploads one level under /drop, and interrupted copy or text
+// temp files in the libraries and the remote-parts folder.
 func (a *App) cleanPartials() {
 	cut := time.Now().Add(-24 * time.Hour)
 	dirs, _ := os.ReadDir(a.cfg.DropDir)
@@ -612,6 +615,40 @@ func (a *App) cleanPartials() {
 			}
 		}
 	}
+	for _, root := range a.idx.enabledRoots() {
+		a.cleanCopyParts(filepath.Join(a.cfg.DataDir, filepath.FromSlash(root)), cut)
+	}
+	if d, err := a.remotePartsDir(); err == nil {
+		a.cleanCopyParts(d, cut)
+	}
+}
+
+// cleanCopyParts sweeps a tree for temp files left by interrupted cross-mount
+// copies and text writes. Resumable uploads (.burrow-part-up-<id>, tracked in the
+// uploads table) are left alone.
+func (a *App) cleanCopyParts(root string, cut time.Time) {
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if p != root && a.idx.excluded(d.Name()) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasPrefix(name, partPrefix+"text-") && !strings.HasPrefix(name, partPrefix+"up-cp-") {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		if info, err := d.Info(); err == nil && info.ModTime().Before(cut) {
+			_ = os.Remove(p)
+		}
+		return nil
+	})
 }
 
 // purgeUploads deletes a drop/collection upload folder unless another link uses it.

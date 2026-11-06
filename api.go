@@ -347,6 +347,9 @@ func (a *App) secure(next http.Handler) http.Handler {
 		p := r.URL.Path
 		public := strings.HasPrefix(p, "/s/") || p == "/healthz" || strings.HasPrefix(p, "/assets/") || p == "/favicon.svg" ||
 			p == "/api/d" || strings.HasPrefix(p, "/api/d/")
+		if !public && publicListener(r) && (a.publicUI.Load() || (p == "/mcp" && a.publicMCP.Load())) {
+			public = true
+		}
 		if !public && !a.adminAllowed(r) {
 			http.Error(w, "not available from this network", http.StatusForbidden)
 			return
@@ -526,6 +529,15 @@ func (a *App) availableRoots() []rootInfo {
 		}
 		out = append(out, rootInfo{Name: d.Name(), Enabled: en[d.Name()]})
 	}
+	seen := map[string]bool{}
+	for _, ri := range out {
+		seen[ri.Name] = true
+	}
+	for _, r := range a.idx.enabledRoots() {
+		if !seen[r] {
+			out = append(out, rootInfo{Name: r, Enabled: true})
+		}
+	}
 	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
 	return out
 }
@@ -664,6 +676,7 @@ func (a *App) apiLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	u, ok := a.checkPassword(in.User, in.Password)
 	if !ok {
+		log.Printf("login failed for %q from %s", trunc(strings.TrimSpace(in.User), 64), a.clientIP(r))
 		httpErr(w, 401, "wrong username or password")
 		return
 	}
@@ -683,6 +696,7 @@ func (a *App) apiLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !a.checkSecondFactor(u, in.Code) {
+			log.Printf("login 2fa failed for %s from %s", u.Name, a.clientIP(r))
 			httpErr(w, 401, "that code is wrong or was already used")
 			return
 		}
@@ -785,7 +799,7 @@ func (a *App) apiRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info, err := os.Stat(abs)
-	if err != nil || info.IsDir() {
+	if err != nil || info.IsDir() || !info.Mode().IsRegular() {
 		httpErr(w, 404, "not found")
 		return
 	}

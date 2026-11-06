@@ -275,6 +275,10 @@ func (a *App) createShare(r *http.Request, u *User, in ShareInput) (Share, error
 		if n > 0 {
 			return Share{}, errors.New("that link name is taken")
 		}
+		_ = a.st.db.QueryRow(`SELECT count(*) FROM share_events WHERE share_id=?`, s).Scan(&n)
+		if n > 0 {
+			return Share{}, errors.New("that link name is taken")
+		}
 		id = s
 	}
 	exp := int64(0)
@@ -307,6 +311,8 @@ func (a *App) createShare(r *http.Request, u *User, in ShareInput) (Share, error
 	}
 	if in.Mode == "collection" {
 		if err := a.addItems(u, id, in.Items, u); err != nil {
+			_, _ = a.st.exec(`DELETE FROM share_items WHERE share_id=?`, id)
+			_, _ = a.st.exec(`DELETE FROM shares WHERE id=?`, id)
 			return Share{}, err
 		}
 	}
@@ -336,7 +342,9 @@ func (a *App) patchShare(u *User, id string, p SharePatch) error {
 	if p.AllowUpload != nil && *p.AllowUpload && !u.Admin {
 		return errAdminsOnly
 	}
-	set := func(col string, v any) { _, _ = a.st.exec(`UPDATE shares SET `+col+`=? WHERE id=?`, v, id) }
+	var sets []string
+	var args []any
+	set := func(col string, v any) { sets = append(sets, col+"=?"); args = append(args, v) }
 	if p.Label != nil {
 		set("label", trunc(*p.Label, 200))
 	}
@@ -348,7 +356,7 @@ func (a *App) patchShare(u *User, id string, p SharePatch) error {
 	} else if p.ExpiresHours != nil {
 		if *p.ExpiresHours < 0 {
 			set("expires", 0)
-		} else {
+		} else if *p.ExpiresHours > 0 {
 			set("expires", now()+int64(*p.ExpiresHours*3600))
 		}
 	}
@@ -375,7 +383,11 @@ func (a *App) patchShare(u *User, id string, p SharePatch) error {
 	if p.ResetCount {
 		set("dl", 0)
 	}
-	return nil
+	if len(sets) == 0 {
+		return nil
+	}
+	_, err := a.st.exec(`UPDATE shares SET `+strings.Join(sets, ", ")+` WHERE id=?`, append(args, id)...)
+	return err
 }
 
 func max64(a, b int64) int64 {
@@ -423,7 +435,11 @@ func (a *App) shareEvents(u *User, id string, limit int) ([]ShareEvent, error) {
 			args = append(args, fargs...)
 		}
 	}
-	q += ` ORDER BY id DESC LIMIT ?`
+	order := "id DESC"
+	if len(args) > 0 {
+		order = "ts DESC, id DESC"
+	}
+	q += ` ORDER BY ` + order + ` LIMIT ?`
 	args = append(args, limit)
 	rows, err := a.st.db.Query(q, args...)
 	if err != nil {
@@ -586,7 +602,7 @@ func (a *App) handleShare(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
-		if bcrypt.CompareHashAndPassword([]byte(s.pwHash), []byte(r.FormValue("password"))) != nil {
+		if bcrypt.CompareHashAndPassword([]byte(s.pwHash), []byte(r.PostFormValue("password"))) != nil {
 			a.logShare(r, s.ID, "password-fail", "")
 			a.renderShare(w, http.StatusUnauthorized, sharePage{S: s, Title: s.Label, Sub: cleanRel(r.FormValue("p")), NeedPW: true, PWError: true, State: "active"})
 			return
@@ -632,6 +648,10 @@ func (a *App) handleShare(w http.ResponseWriter, r *http.Request) {
 	case "dl", "raw":
 		if info.IsDir() {
 			httpErr(w, 400, "use zip for folders")
+			return
+		}
+		if !info.Mode().IsRegular() {
+			httpErr(w, 404, "not found")
 			return
 		}
 		if !a.gateDownload(w, r, s, cleanRel(sub), action == "dl") {
@@ -737,16 +757,21 @@ func (a *App) gateDownload(w http.ResponseWriter, r *http.Request, s Share, sub 
 	return true
 }
 
-func (a *App) resumeCookie(id string) string { return "br_" + id }
+func (a *App) resumeCookie(id, sub string) string {
+	if sub == "" {
+		return "br_" + id
+	}
+	return "br_" + id + "-" + a.sign("rc|"+id+"|"+sub)[:8]
+}
 
 // grantResume lets this browser fetch the rest of a file it was counted for (6 hours).
 func (a *App) grantResume(w http.ResponseWriter, r *http.Request, s Share, sub string) {
 	exp := strconv.FormatInt(now()+6*3600, 10)
-	http.SetCookie(w, &http.Cookie{Name: a.resumeCookie(s.ID), Value: exp + "." + a.sign("resume|"+s.ID+"|"+sub+"|"+exp), Path: "/s/" + s.ID, HttpOnly: true, Secure: a.isHTTPS(r), SameSite: http.SameSiteLaxMode, MaxAge: 6 * 3600})
+	http.SetCookie(w, &http.Cookie{Name: a.resumeCookie(s.ID, sub), Value: exp + "." + a.sign("resume|"+s.ID+"|"+sub+"|"+exp), Path: "/s/" + s.ID, HttpOnly: true, Secure: a.isHTTPS(r), SameSite: http.SameSiteLaxMode, MaxAge: 6 * 3600})
 }
 
 func (a *App) resumeOK(r *http.Request, s Share, sub string) bool {
-	c, err := r.Cookie(a.resumeCookie(s.ID))
+	c, err := r.Cookie(a.resumeCookie(s.ID, sub))
 	if err != nil {
 		return false
 	}

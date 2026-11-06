@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
@@ -180,7 +181,11 @@ func (a *App) shareInScope(u *User, s Share) bool {
 	case "link":
 		return u.lim.covers(s.Path)
 	case "collection":
-		for _, p := range a.itemPaths(s.ID) {
+		paths, err := a.itemPaths(s.ID)
+		if err != nil {
+			return false
+		}
+		for _, p := range paths {
 			if !u.lim.covers(p) {
 				return false
 			}
@@ -279,7 +284,10 @@ func (a *App) apiNewToken(w http.ResponseWriter, r *http.Request) {
 		Name  string
 		Scope *TokenScope
 	}
-	_ = readJSON(r, &in)
+	if err := readJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		httpErr(w, 400, "bad request")
+		return
+	}
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
 		name = "token"
