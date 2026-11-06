@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -189,6 +190,8 @@ func peerOf(r *http.Request) string {
 
 // certPins are the SHA-256 fingerprints of the certificate Burrow presents, for
 // the app to pin when the certificate isn't publicly trusted (the self-signed one).
+// The previous certificate's pin is kept alongside for a while, so a phone whose
+// only route is the bridge can still connect, and refresh its pins, after a change.
 func (a *App) certPins() []string {
 	if a.certs == nil {
 		return []string{}
@@ -198,7 +201,32 @@ func (a *App) certPins() []string {
 		return []string{}
 	}
 	sum := sha256.Sum256(c.Certificate[0])
-	return []string{base64.RawURLEncoding.EncodeToString(sum[:])}
+	cur := base64.RawURLEncoding.EncodeToString(sum[:])
+	if prev := a.prevCertPin(cur); prev != "" {
+		return []string{cur, prev}
+	}
+	return []string{cur}
+}
+
+// prevCertPin keeps a one-deep pin history in settings: when the served pin
+// changes, the one phones were given until now is stored with a timestamp, and
+// returned for 90 days after the change.
+func (a *App) prevCertPin(cur string) string {
+	if last := a.st.get("cert_pin"); last != cur {
+		if last != "" {
+			a.st.set("prev_cert_pin", last+"|"+strconv.FormatInt(time.Now().Unix(), 10))
+		}
+		a.st.set("cert_pin", cur)
+	}
+	pin, ts, ok := strings.Cut(a.st.get("prev_cert_pin"), "|")
+	if !ok || pin == "" || pin == cur {
+		return ""
+	}
+	t, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil || time.Since(time.Unix(t, 0)) > 90*24*time.Hour {
+		return ""
+	}
+	return pin
 }
 
 // serverInfo is what a device learns about the server, inside the channel.
@@ -406,11 +434,7 @@ func chReply(w http.ResponseWriter, b []byte) {
 
 // handlePair completes a pairing started in the web UI.
 func (a *App) handlePair(w http.ResponseWriter, r *http.Request) {
-	ipKey := "pair:" + limitIP(a.clientIP(r))
-	if !a.limiter.take(ipKey, pairLimit, 15*time.Minute) {
-		httpErr(w, 429, "too many attempts; wait 15 minutes")
-		return
-	}
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(30 * time.Second))
 	req, ok := chBody(w, r, 8<<10)
 	if !ok {
 		return
@@ -426,6 +450,14 @@ func (a *App) handlePair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	codeID := hex.EncodeToString(req[1 : 1+chIDLen])
+	ipKey := "pair:" + limitIP(a.clientIP(r))
+	if viaTether(r) { // bridge requests share one address: limit per claimed code instead
+		ipKey = "pair:code:" + codeID
+	}
+	if !a.limiter.take(ipKey, pairLimit, 15*time.Minute) {
+		httpErr(w, 429, "too many attempts; wait 15 minutes")
+		return
+	}
 	nonce := req[1+chIDLen : 1+chIDLen+chNonce]
 	ek := req[1+chIDLen+chNonce : 1+chIDLen+chNonce+chEK]
 	cx := req[head-chX : head]
@@ -493,11 +525,7 @@ func (a *App) handlePair(w http.ResponseWriter, r *http.Request) {
 
 // handleHello starts a session for a paired device.
 func (a *App) handleHello(w http.ResponseWriter, r *http.Request) {
-	ipKey := "hello:" + limitIP(a.clientIP(r))
-	if !a.limiter.take(ipKey, helloLimit, 15*time.Minute) {
-		httpErr(w, 429, "too many attempts; wait 15 minutes")
-		return
-	}
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(30 * time.Second))
 	req, ok := chBody(w, r, 4<<10)
 	if !ok {
 		return
@@ -507,6 +535,14 @@ func (a *App) handleHello(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	devID := hex.EncodeToString(req[1 : 1+chIDLen])
+	ipKey := "hello:" + limitIP(a.clientIP(r))
+	if viaTether(r) { // bridge requests share one address: limit per claimed device instead
+		ipKey = "hello:dev:" + devID
+	}
+	if !a.limiter.take(ipKey, helloLimit, 15*time.Minute) {
+		httpErr(w, 429, "too many attempts; wait 15 minutes")
+		return
+	}
 	ek := req[1+chIDLen+chNonce : 1+chIDLen+chNonce+chEK]
 	cx := req[1+chIDLen+chNonce+chEK : len(req)-chMAC]
 	var dk []byte
@@ -620,6 +656,8 @@ var innerHeaders = []string{"Range", "If-Range", "If-Modified-Since", "If-None-M
 // handleTunnel decrypts one request from a device, runs it as that device's
 // user, and encrypts the reply.
 func (a *App) handleTunnel(w http.ResponseWriter, r *http.Request) {
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(30 * time.Second))
 	br := bufio.NewReaderSize(r.Body, 64<<10)
 	var head [1 + chIDLen + 8]byte
 	if _, err := io.ReadFull(br, head[:]); err != nil || head[0] != chVersion {
@@ -666,6 +704,7 @@ func (a *App) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	_ = rc.SetReadDeadline(time.Time{}) // authenticated: a long upload may stream from here
 	switch ih.Method {
 	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 	default:
@@ -698,7 +737,7 @@ func (a *App) handleTunnel(w http.ResponseWriter, r *http.Request) {
 		ir.ContentLength = *ih.Length
 	}
 	ir = withAuth(ir, authInfo{user: u, viaAPI: true, deviceID: s.deviceID})
-	_ = http.NewResponseController(w).EnableFullDuplex()
+	_ = rc.EnableFullDuplex()
 	iw := &innerWriter{outer: w, key: chExpand(s.key, "burrow-v1 s2c "+msgNo), aad: head[:], header: http.Header{}}
 	a.devMux.ServeHTTP(iw, ir)
 	iw.finish()

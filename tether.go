@@ -78,9 +78,8 @@ type tether struct {
 	lastErr  string
 	restarts int
 
-	lnOnce sync.Once
+	lnMu   sync.Mutex
 	lnAddr string
-	lnErr  error
 }
 
 // tetherBinary finds burrow-tether: BURROW_TETHER_BIN, the PATH, or next to burrow.
@@ -135,24 +134,26 @@ func (t *tether) stop() {
 	}
 }
 
-// listener starts, once, the loopback TLS listener the bridge forwards to.
+// listener starts, on first success, the loopback TLS listener the bridge
+// forwards to. A failure isn't kept, so the next start tries again.
 func (t *tether) listener() (string, error) {
-	t.lnOnce.Do(func() {
-		cfg := t.a.tlsCfg
-		if cfg == nil {
-			t.lnErr = errors.New("no TLS configuration")
-			return
-		}
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.lnErr = err
-			return
-		}
-		t.lnAddr = ln.Addr().String()
-		srv := &http.Server{Handler: t.a.tetherRoutes(), ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10, ErrorLog: quietLog}
-		go func() { _ = serveTLSOnly(srv, ln, cfg) }()
-	})
-	return t.lnAddr, t.lnErr
+	t.lnMu.Lock()
+	defer t.lnMu.Unlock()
+	if t.lnAddr != "" {
+		return t.lnAddr, nil
+	}
+	cfg := t.a.tlsCfg
+	if cfg == nil {
+		return "", errors.New("no TLS configuration")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	t.lnAddr = ln.Addr().String()
+	srv := &http.Server{Handler: t.a.tetherRoutes(), ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10, ErrorLog: quietLog}
+	go func() { _ = serveTLSOnly(srv, ln, cfg) }()
+	return t.lnAddr, nil
 }
 
 func (t *tether) supervise(ctx context.Context, done chan struct{}) {
@@ -214,8 +215,9 @@ func (t *tether) run(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	var exitErr error
+	exited := make(chan struct{})
+	go func() { exitErr = cmd.Wait(); close(exited) }()
 	rctx, rcancel := context.WithCancel(ctx)
 	defer rcancel()
 	go func() {
@@ -256,6 +258,15 @@ func (t *tether) run(ctx context.Context) error {
 			ch <- m
 		}
 	}
+	if err := sc.Err(); err != nil {
+		log.Printf("tether: reading the bridge: %v", err)
+		_ = stdin.Close() // asks it to shut down
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+		}
+	}
 	t.mu.Lock()
 	t.stdin, t.id = nil, ""
 	for k, ch := range t.pending {
@@ -263,7 +274,8 @@ func (t *tether) run(ctx context.Context) error {
 		delete(t.pending, k)
 	}
 	t.mu.Unlock()
-	return <-exited
+	<-exited
+	return exitErr
 }
 
 var errTetherOff = errors.New("reach from anywhere is off on this Burrow")
