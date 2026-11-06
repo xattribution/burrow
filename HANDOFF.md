@@ -146,7 +146,12 @@ could take: token-delete / 2FA-off buttons arm but never disarm (excluded from
 F23's seven sites); F14 part 3 (row-selection short-circuit in route()) not
 applied; one status poller may tick on the login screen after sign-out.
 
-**Backend wave A+B running since ~21:55 UTC** (runs wf_eddc4c71-495, wf_b8b4d5f2-211):
+**Backend wave B DONE and pushed (9578a8e + 6752663):** B13 (race, -race-verified),
+B10, B11, B12, B6, B9, B3, B21, B20 — all done, none skipped. Note: B3 added a
+downgrade-safe tokens.device_id column; B11's sentinel seeds only after
+initial_scan_done (agent's deliberate, documented deviation).
+
+**Backend wave A running since ~21:55 UTC** (run wf_eddc4c71-495):
 5 agents on disjoint clusters — shares.go+tests (P2,P16,B8,B14,B16,B19,B22,P17),
 mcp/tokens/collections (B1,B4,B15,B25,B26,B23), api/thumbs/main (B2,B27,B5,B7,
 B24,B18,B28), indexer/writes (B13,B10,B11,B12), remote/transfer/tether/devices
