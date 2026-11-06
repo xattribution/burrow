@@ -115,6 +115,7 @@ func main() {
 			if len(os.Args) < 3 {
 				log.Fatal("usage: burrow backup <file>")
 			}
+			syscall.Umask(0o077)
 			cfg := loadConfig()
 			s, err := openStore(filepath.Join(cfg.StateDir, "burrow.db"))
 			if err != nil {
@@ -125,7 +126,9 @@ func main() {
 			if _, err := s.db.Exec(`VACUUM INTO ?`, os.Args[2]); err != nil {
 				log.Fatal(err)
 			}
-			_ = os.Chmod(os.Args[2], 0o600) // holds password hashes and 2FA secrets
+			if err := os.Chmod(os.Args[2], 0o600); err != nil { // holds password hashes and 2FA secrets
+				log.Print(err)
+			}
 			println("backup written to " + os.Args[2])
 			return
 		case "reset-password":

@@ -761,7 +761,7 @@ func (a *App) resumeCookie(id, sub string) string {
 	if sub == "" {
 		return "br_" + id
 	}
-	return "br_" + id + "-" + a.sign("rc|"+id+"|"+sub)[:8]
+	return "br_" + id + "-" + a.sign("rc|" + id + "|" + sub)[:8]
 }
 
 // grantResume lets this browser fetch the rest of a file it was counted for (6 hours).

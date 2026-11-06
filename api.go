@@ -703,6 +703,7 @@ func (a *App) apiLogin(w http.ResponseWriter, r *http.Request) {
 		a.limiter.refund(codeKey)
 	}
 	a.newSession(w, r, u.ID)
+	log.Printf("login: %s from %s", u.Name, a.clientIP(r))
 	writeJSON(w, map[string]bool{"ok": true})
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -32,7 +33,7 @@ func (a *App) resolve(rel string) (string, string, error) {
 	abs := filepath.Join(a.cfg.DataDir, filepath.FromSlash(rel))
 	real, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", "", err
+		return "", "", fs.ErrNotExist
 	}
 	base, _ := filepath.EvalSymlinks(a.cfg.DataDir)
 	if real != abs && real != filepath.Join(base, filepath.FromSlash(rel)) {
