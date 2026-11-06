@@ -33,11 +33,12 @@ for approval; commit + push continuously; document in parallel (this file).
       (24 frontend, 28 backend, 20 periphery) in `HANDOFF-findings/*.json`.
 - [x] Implementation: 4 waves, 11 agents → **65 findings implemented, 0 skipped**
       (every non-Android finding; 6 Android findings documented for a follow-up).
-- [x] Final verification at 9d8b5e1: `gofmt -l` clean, `go build` + `go vet` clean,
-      **full `go test ./...` GREEN (58.1s)**, `go test -race ./...` run (result in
-      final session summary), and a Playwright end-to-end smoke (fresh state →
-      setup form → login → indexed library, zero page errors) at both cf2a1a0
-      and 9d8b5e1.
+- [x] Final verification: `gofmt -l` clean, `go build` + `go vet` clean,
+      **full `go test ./...` GREEN (58.1s)** and **full `go test -race ./...`
+      GREEN (632s, zero data races)**; Playwright end-to-end smoke (fresh state →
+      setup form → login → indexed library, zero page errors) at cf2a1a0 and
+      9d8b5e1; Android `:shared:jvmTest` 7/7 GREEN including the new
+      hidden-file-sync regression test against the real server.
 - 8 new tests added: per-file folder download limits, PATCH lifecycle, backup
   round-trip on a live store, hostile-EXIF regression, revoked-grant uploads,
   token access injection, folder-limited MCP edits (plus the race fix verified
