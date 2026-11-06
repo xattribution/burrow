@@ -84,6 +84,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           build-args: VERSION=${{ github.ref_name }}-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   # The phone app: shared-core tests against the real server, UI tests at phone,
   # foldable and tablet sizes, lint, and a debug APK to try out.
@@ -166,7 +168,7 @@ jobs:
   # only exists in the "release" environment (limited to v* tags), and
   # attaches it to a GitHub release.
   apk:
-    needs: [test, android, android-device]
+    needs: [test, image, android, android-device]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: release

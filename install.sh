@@ -52,7 +52,8 @@ TZ=$(cat /etc/timezone 2>/dev/null || echo UTC)
 EOF
     fi
     chown -R "$OWNER": "$DIR"
-    compose pull && compose up -d
+    compose pull
+    compose up -d
     ip=$(hostname -I 2>/dev/null | awk '{print $1}')
     echo "Burrow is running. Open https://${ip:-localhost}:$(grep ^PORT= "$DIR/.env" | cut -d= -f2) to finish setup (accept the self-signed certificate)."
     echo "The setup key is in the log: docker logs burrow"
@@ -67,7 +68,8 @@ EOF
     if running; then
       before=$(docker exec burrow burrow version 2>&1 || true)
       f="burrow-$(date +%Y%m%d-%H%M%S)-before-update.db"
-      backup_to "$f" && echo "Backed up first: $DIR/backups/$f"
+      if ! backup_to "$f"; then echo "Backup failed; not updating."; exit 1; fi
+      echo "Backed up first: $DIR/backups/$f"
     fi
     # Take the new compose.yaml, unless you edited yours (then it's left alone).
     new=$(mktemp)
@@ -83,12 +85,14 @@ EOF
     cp "$new" "$DIR/.compose.upstream.yaml" && rm -f "$new"
     chown "$OWNER": "$DIR/compose.yaml" "$DIR/.compose.upstream.yaml"
     # A version pins that image (going back is an update to the older version); "latest" unpins.
+    old_tag=$(grep '^BURROW_TAG=' "$DIR/.env" | cut -d= -f2- || true)
     case "$want" in
       "") ;;
       latest) set_env BURROW_TAG "" ;;
       *) set_env BURROW_TAG "$want" ;;
     esac
-    compose pull && compose up -d
+    compose pull || { set_env BURROW_TAG "$old_tag"; echo "Image pull failed; nothing changed."; exit 1; }
+    compose up -d
     for i in $(seq 1 30); do docker exec burrow burrow healthcheck >/dev/null 2>&1 && break; sleep 2; done
     if ! docker exec burrow burrow healthcheck >/dev/null 2>&1; then
       echo "Burrow isn't answering after the update. See: docker logs burrow"
@@ -122,7 +126,8 @@ EOF
     compose stop
     cp "$DIR/state/burrow.db" "$DIR/state/burrow.db.before-restore" 2>/dev/null || true
     rm -f "$DIR/state/burrow.db-wal" "$DIR/state/burrow.db-shm"
-    cp "$f" "$DIR/state/burrow.db" && chown "$OWNER": "$DIR/state/burrow.db"
+    cp "$f" "$DIR/state/burrow.db"
+    chown "$OWNER": "$DIR/state/burrow.db"
     compose start
     echo "Restored from $f. The previous database is at $DIR/state/burrow.db.before-restore."
     ;;
