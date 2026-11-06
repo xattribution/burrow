@@ -210,8 +210,8 @@ func (ix *Indexer) run(ctx context.Context) {
 		if err != nil {
 			ix.setWatchNote("live updates unavailable: " + err.Error())
 		} else {
-			ix.w = w
 			ix.mu.Lock()
+			ix.w = w
 			ix.status.Watching = true
 			ix.mu.Unlock()
 			go ix.watchLoop(ctx)
@@ -511,16 +511,14 @@ func (b *batch) flush() {
 // ---- live updates ----
 
 func (ix *Indexer) addWatch(abs string) {
-	if ix.w == nil {
-		return
-	}
 	ix.mu.Lock()
-	if ix.watched[abs] || ix.wFull {
+	w := ix.w
+	if w == nil || ix.watched[abs] || ix.wFull {
 		ix.mu.Unlock()
 		return
 	}
 	ix.mu.Unlock()
-	if err := ix.w.Add(abs); err != nil {
+	if err := w.Add(abs); err != nil {
 		ix.mu.Lock()
 		if errors.Is(err, syscall.ENOSPC) {
 			ix.wFull = true

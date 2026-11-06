@@ -141,6 +141,7 @@ type remoteLib struct {
 	mu      sync.Mutex
 	conn    remoteFS
 	lastErr string
+	closed  bool
 }
 
 // do runs fn against the connection, dialing first if needed. A failure that
@@ -150,6 +151,10 @@ func (l *remoteLib) do(fn func(remoteFS) error) error {
 		l.mu.Lock()
 		c := l.conn
 		if c == nil {
+			if l.closed {
+				l.mu.Unlock()
+				return fmt.Errorf("can't reach %s: %w", l.Name, errRemoteDown)
+			}
 			var err error
 			if c, err = l.cfg.dial(); err != nil {
 				l.lastErr = err.Error()
@@ -176,6 +181,7 @@ func (l *remoteLib) do(fn func(remoteFS) error) error {
 func (l *remoteLib) close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.closed = true
 	if l.conn != nil {
 		_ = l.conn.Close()
 		l.conn = nil
@@ -874,6 +880,7 @@ func (b *burrowFS) Close() error {
 // publicly trusted.
 func pinnedClient(pin string) *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = 60 * time.Second
 	tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	if pin != "" {
 		tr.TLSClientConfig.InsecureSkipVerify = true // replaced by the fingerprint check below

@@ -64,6 +64,7 @@ func migrateUsers(db *sql.DB) error {
 		`ALTER TABLE tokens ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE tokens ADD COLUMN last_ip TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE tokens ADD COLUMN scope TEXT NOT NULL DEFAULT ''`, // '' = made before scopes: every tool, the API too
+		`ALTER TABLE tokens ADD COLUMN device_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE shares ADD COLUMN owner_id INTEGER NOT NULL DEFAULT 1`,
 	} {
 		_, _ = db.Exec(q) // "duplicate column" means already applied

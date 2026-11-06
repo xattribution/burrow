@@ -246,7 +246,14 @@ func (s remoteSide) put(rel string, r io.Reader, size int64, mtime time.Time) er
 	c := s.l.conn
 	s.l.mu.Unlock()
 	if c == nil {
-		return s.l.do(func(c remoteFS) error { return c.Put(in, r, size, mtime) })
+		tried := false
+		return s.l.do(func(c remoteFS) error {
+			if tried {
+				return fmt.Errorf("upload interrupted: %w", io.ErrUnexpectedEOF)
+			}
+			tried = true
+			return c.Put(in, r, size, mtime)
+		})
 	}
 	return c.Put(in, r, size, mtime)
 }

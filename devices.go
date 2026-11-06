@@ -139,6 +139,7 @@ func (a *App) dropDeviceSessions(deviceID string, userID int64) {
 
 // revokeDevices removes every device of a user (account recovery, deleted user).
 func (a *App) revokeDevices(userID int64) {
+	_, _ = a.st.exec(`DELETE FROM tokens WHERE device_id IN (SELECT id FROM devices WHERE user_id=?)`, userID)
 	_, _ = a.st.exec(`DELETE FROM devices WHERE user_id=?`, userID)
 	a.dropDeviceSessions("", userID)
 	go a.tether.reconcile()
@@ -410,6 +411,7 @@ func (a *App) apiRevokeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = a.st.exec(`DELETE FROM devices WHERE id=?`, id)
+	_, _ = a.st.exec(`DELETE FROM tokens WHERE device_id=?`, id)
 	a.dropDeviceSessions(id, 0)
 	go a.tether.reconcile()
 	writeJSON(w, map[string]bool{"ok": true})
@@ -834,6 +836,7 @@ func (a *App) apiDeviceUpdate(w http.ResponseWriter, r *http.Request) {
 func (a *App) apiDeviceUnpair(w http.ResponseWriter, r *http.Request) {
 	id := authOf(r).deviceID
 	_, _ = a.st.exec(`DELETE FROM devices WHERE id=?`, id)
+	_, _ = a.st.exec(`DELETE FROM tokens WHERE device_id=?`, id)
 	a.dropDeviceSessions(id, 0)
 	go a.tether.reconcile()
 	writeJSON(w, map[string]bool{"ok": true})
@@ -852,7 +855,7 @@ func (a *App) apiDeviceLinkToken(w http.ResponseWriter, r *http.Request) {
 	b, _ := json.Marshal(sc)
 	tok := "brw_" + randToken(24)
 	name := trunc("Linked from "+strings.TrimSpace(dev), 80)
-	if _, err := a.st.exec(`INSERT INTO tokens(name,hash,created,user_id,scope) VALUES(?,?,?,?,?)`, name, sha(tok), now(), ai.user.ID, string(b)); err != nil {
+	if _, err := a.st.exec(`INSERT INTO tokens(name,hash,created,user_id,scope,device_id) VALUES(?,?,?,?,?,?)`, name, sha(tok), now(), ai.user.ID, string(b), ai.deviceID); err != nil {
 		httpErr(w, 500, err.Error())
 		return
 	}

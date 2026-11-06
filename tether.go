@@ -268,10 +268,12 @@ func (t *tether) run(ctx context.Context) error {
 		}
 	}
 	t.mu.Lock()
-	t.stdin, t.id = nil, ""
-	for k, ch := range t.pending {
-		close(ch)
-		delete(t.pending, k)
+	if t.stdin == stdin {
+		t.stdin, t.id = nil, ""
+		for k, ch := range t.pending {
+			close(ch)
+			delete(t.pending, k)
+		}
 	}
 	t.mu.Unlock()
 	<-exited
