@@ -29,8 +29,8 @@ for approval; commit + push continuously; document in parallel (this file).
 ## State
 
 - [x] Baseline: `go build ./...` OK, `go vet ./...` clean (Go 1.26.9).
-- [ ] Baseline: full `go test ./...` running in background (result pending — record it
-      here; distinguish pre-existing failures from ours).
+- [x] Baseline: full `go test ./...` GREEN (`ok burrow 57.4s`, exit 0) at 92d73ae.
+      `gofmt -l` flagged only share_nested_test.go; fixed. Any later test failure is ours.
 - [ ] Audit workflows: launched 20:50 UTC, results pending.
       Run IDs (transcripts under `/root/.claude/projects/-home-user-burrow/.../workflows/`):
       backend `wf_c54ec33d-ab6`, frontend `wf_54e5842f-dee`, periphery `wf_0b410a44-3f9`.

@@ -19,8 +19,8 @@ func TestShareLinksReachEveryLevel(t *testing.T) {
 	base := filepath.Join(e.data, "PROJECTS", "Claude Projects", "Quartermaster")
 	files := map[string]string{
 		"qm.exe": "exe",
-		"quartermaster-models/models & voices.json":                "{}",
-		"quartermaster-models/text-to-speech/voice one.gguf":       "gguf",
+		"quartermaster-models/models & voices.json":               "{}",
+		"quartermaster-models/text-to-speech/voice one.gguf":      "gguf",
 		"quartermaster-models/text-to-speech/deeper #2/notes.txt": "deep",
 	}
 	for rel, body := range files {
