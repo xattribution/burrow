@@ -229,3 +229,75 @@ func TestTokensFromBeforeScopes(t *testing.T) {
 		t.Fatalf("old token on the API: %d", c)
 	}
 }
+
+// TestTokenAccessFieldNotSettable: the scope's access field is Burrow's own; sending
+// it through the token API must not mint a REST token that reads, shares or edits
+// with no tools turned on.
+func TestTokenAccessFieldNotSettable(t *testing.T) {
+	e := setup(t)
+	forged := map[string]any{"api": true, "access": []string{"read", "share", "edit"}, "tools": map[string]any{}}
+	var tok struct{ Token string }
+	_ = json.Unmarshal(e.do("POST", "/api/tokens", map[string]any{"name": "forged", "scope": forged}, 200), &tok)
+	powerless := func() {
+		t.Helper()
+		if c, _ := e.bearer(tok.Token, "GET", "/api/raw?path=DOCS/notes.txt", nil); c != 404 {
+			t.Fatalf("forged access read a file: %d", c)
+		}
+		if c, _ := e.bearer(tok.Token, "POST", "/api/fs/mkdir", map[string]any{"path": "DOCS/x"}); c == 200 {
+			t.Fatal("forged access made a folder")
+		}
+		if c, _ := e.bearer(tok.Token, "POST", "/api/shares", map[string]any{"path": "DOCS/notes.txt"}); c == 200 {
+			t.Fatal("forged access made a link")
+		}
+	}
+	powerless()
+	var toks []tokenView
+	_ = json.Unmarshal(e.do("GET", "/api/tokens", nil, 200), &toks)
+	e.do("PATCH", "/api/tokens/"+itoa(toks[0].ID), map[string]any{"scope": forged}, 200)
+	powerless()
+	_ = json.Unmarshal(e.do("GET", "/api/tokens", nil, 200), &toks)
+	if len(toks[0].Scope.Access) != 0 {
+		t.Fatalf("access kept in the stored scope: %+v", toks[0].Scope)
+	}
+}
+
+// TestTokenEditToolsRespectFolders: a token limited to one folder can write there,
+// but can't write, make folders, move things out to, or delete anywhere else.
+func TestTokenEditToolsRespectFolders(t *testing.T) {
+	e := setup(t)
+	all := map[string]string{}
+	for _, tl := range mcpTools {
+		all[tl.Name] = "ask"
+	}
+	delete(all, "create_file_drop") // no admin powers
+	_, call := e.mcpClient(map[string]any{"tools": all, "folders": []string{"PROJECTS/lamp"}})
+	tc := func(name string, args map[string]any) map[string]any { return call("tools/call", toolCall(name, args)) }
+
+	if res := tc("write_text_file", map[string]any{"path": "PROJECTS/lamp/ok.txt", "text": "x"}); res["isError"] == true {
+		t.Fatalf("write inside the token's folders: %s", resultText(res))
+	}
+	if res := tc("write_text_file", map[string]any{"path": "DOCS/evil.txt", "text": "x"}); res["isError"] != true {
+		t.Fatal("wrote outside the token's folders")
+	}
+	if _, err := os.Stat(filepath.Join(e.data, "DOCS/evil.txt")); !os.IsNotExist(err) {
+		t.Fatal("file written outside the token's folders")
+	}
+	if res := tc("create_folder", map[string]any{"path": "DOCS/made"}); res["isError"] != true {
+		t.Fatal("made a folder outside the token's folders")
+	}
+	if _, err := os.Stat(filepath.Join(e.data, "DOCS/made")); !os.IsNotExist(err) {
+		t.Fatal("folder made outside the token's folders")
+	}
+	if res := tc("move_item", map[string]any{"from": "PROJECTS/lamp/shade.stl", "to": "DOCS/shade.stl"}); res["isError"] != true {
+		t.Fatal("moved a file out of the token's folders")
+	}
+	if _, err := os.Stat(filepath.Join(e.data, "PROJECTS/lamp/shade.stl")); err != nil {
+		t.Fatalf("source gone after the refused move: %v", err)
+	}
+	if res := tc("delete_item", map[string]any{"path": "DOCS/notes.txt"}); res["isError"] != true {
+		t.Fatal("deleted outside the token's folders")
+	}
+	if _, err := os.Stat(filepath.Join(e.data, "DOCS/notes.txt")); err != nil {
+		t.Fatalf("file gone after the refused delete: %v", err)
+	}
+}

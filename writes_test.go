@@ -401,3 +401,34 @@ func TestUploadThroughDeviceChannel(t *testing.T) {
 		t.Fatalf("sync list: %+v", r)
 	}
 }
+
+// TestUploadRefusedAfterGrantRevoked: an upload opened while the user could write
+// stops the moment the grant is narrowed to read-only, at the next chunk and at finish.
+func TestUploadRefusedAfterGrantRevoked(t *testing.T) {
+	e := setup(t)
+	u := e.mkUser("ed", false, Grant{Path: "PROJECTS/lamp", Read: true, Write: true})
+	ed := e.as("ed", "longenough-ed")
+	body := []byte("0123456789")
+
+	// x.bin is half sent, y.bin fully sent but not finished, when write goes away
+	var half, full map[string]any
+	_ = json.Unmarshal(ed.do("POST", "/api/uploads", map[string]any{"dir": "PROJECTS/lamp", "name": "x.bin", "size": len(body)}, 200), &half)
+	if code, b := ed.put("/api/uploads/"+half["id"].(string)+"?offset=0", body[:5]); code != 200 {
+		t.Fatalf("first chunk: %d %s", code, b)
+	}
+	_ = json.Unmarshal(ed.do("POST", "/api/uploads", map[string]any{"dir": "PROJECTS/lamp", "name": "y.bin", "size": len(body)}, 200), &full)
+	if code, b := ed.put("/api/uploads/"+full["id"].(string)+"?offset=0", body); code != 200 {
+		t.Fatalf("whole file: %d %s", code, b)
+	}
+	e.do("PATCH", "/api/users/"+itoa(u.ID), map[string]any{"grants": []Grant{{Path: "PROJECTS/lamp", Read: true}}}, 200)
+
+	if code, b := ed.put("/api/uploads/"+half["id"].(string)+"?offset=5", body[5:]); code != 403 {
+		t.Fatalf("chunk after the grant was revoked: %d %s", code, b)
+	}
+	ed.do("POST", "/api/uploads/"+full["id"].(string)+"/finish", map[string]any{}, 403)
+	for _, name := range []string{"x.bin", "y.bin"} {
+		if _, err := os.Stat(filepath.Join(e.data, "PROJECTS/lamp", name)); !os.IsNotExist(err) {
+			t.Fatalf("%s landed after the grant was revoked", name)
+		}
+	}
+}
