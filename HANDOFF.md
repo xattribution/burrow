@@ -104,6 +104,23 @@ Implementable here (Go/sh/yaml):
 
 ## Implementation status
 
+**DONE and pushed (all green: go build/vet, targeted tests pass):**
+- P3 install.sh errexit fixes (e9e9a46) — verified by a 27-check stub harness
+- P11 + P18 CI: apk job needs image; buildx GHA cache; Dockerfile Go cache mounts
+  (e9e9a46, f148669)
+- P7, P12, P13, P14, P15 devices.go/tether.go hardening (2a4b1d5) — note: cert
+  rotation history is handled lazily in certPins() with new settings keys
+  cert_pin / prev_cert_pin (90-day grace); hello/pair rate-limit now counted only
+  for well-formed bodies
+- P8, P9, P10 new boundary tests in writes_test.go / tokens_test.go (3dd23b9)
+- First app.js correctness fixes snapshot (b2a5046)
+
+**Still open for a future agent:** P2, P16, P17 (shares.go + burrow_test.go —
+deliberately held back from the concurrent waves to avoid file collisions; cluster
+file content preserved in HANDOFF-findings/periphery.json), all Android items
+(P1 P0!, P4, P5, P6, P19, P20), and whatever the backend judge + frontend wave
+report (tracked below as they land).
+
 Frontend wave launched (~21:28 UTC), three clusters:
 - app.js bugs (F1,F4,F2,F3,F5,F6,F7,F20,F22,F8) — agent 1
 - share page + Go UI bits + CSS (F9,F10,F11,F12,F13,F18) — agent 2
