@@ -70,7 +70,28 @@ fix, notes). Status per finding is updated below as implementation lands.
 - F23 P3 app.js:737 — armed danger buttons never disarm
 - F24 P3 app.js:548 — form errors/confirmations silent for screen readers
 
-### Backend — judge pending (run `wf_c54ec33d-ab6`)
+### Backend (28 verified of ~60 raw; `HANDOFF-findings/backend.json`)
+
+- B1 P1 mcp.go:419 — MCP read_text_file symlink-swap TOCTOU + nil-FileInfo deref
+- B2 P1 thumbs.go:181 — exifOrientation panics on crafted JPEG APP1 (size 15)
+- B3 P2 devices.go:855 — tokens minted by a phone survive revoking that phone
+  (needs tokens.device_id column — DB change, held for review; see backend.json)
+- B4 P2 tokens.go:183 — shareInScope fails OPEN on DB error for folder-limited tokens
+- B5 P2 api.go:788 — FIFO in library blocks handler goroutines forever (raw/dl/thumb)
+- B6 P2 remote.go:891 — no response-header timeout; stalled peer wedges remoteLib.mu
+- B7 P2 api.go:527 — saveRoots drops an offline-but-enabled root; next scan deletes index
+- B8 P2 shares.go:277 — reused custom slug inherits previous link's visitor history
+- B9 P2 tether.go:259 — tether off/on within ~5s bricks it (re-check after 2a4b1d5!)
+- B10 P2 indexer.go:315 — refreshCounts full-table sum() per write + every 2s browse
+- B11 P2 writes.go:1310 — apiSyncChanged says changed=true forever on empty changes table
+- B12 P2 indexer.go:571 — inotify overflow only logged; index stale until 6h rescan
+- B13 P2 indexer.go:213 — data race on Indexer.w (indexer goroutine vs HTTP Refresh)
+- B14-B28 P3 — partial-commit createShare, path leaks in errors, patchShare silent
+  failures, rows.Err() checks, sign-in logging, share password in URL query,
+  remote put retry on half-consumed reader, loadRemotes closing in-use libs,
+  link-history sort index, orphaned .burrow-part-* cleanup, admin_cidrs switch
+  interaction, MCP 1MB truncation, token mint from malformed JSON, thumb pixel
+  overflow on 32-bit, backup file perms during VACUUM.
 
 ### Periphery (20 verified of 34 raw; `HANDOFF-findings/periphery.json`)
 

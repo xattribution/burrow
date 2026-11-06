@@ -1,0 +1,255 @@
+[
+ {
+  "file": "mcp.go",
+  "line": 419,
+  "title": "MCP read_text_file uses os.Open (symlink-swap TOCTOU) and dereferences a nil FileInfo when fstat fails",
+  "kind": "security",
+  "severity": "P1",
+  "fix": "In mcpCall's read_text_file case (mcp.go:407-437), replace the open/stat block. After resolveFor succeeds: (1) `st, err := os.Lstat(abs); if err != nil { return nil, errors.New(\"not found\") }`; (2) `if st.IsDir() { return nil, fmt.Errorf(\"that is a folder\") }`; (3) `if !st.Mode().IsRegular() { return nil, fmt.Errorf(\"not a readable file\") }` (a FIFO would otherwise block the goroutine forever on open); (4) open with `f, err := a.openNoFollow(abs)` instead of `os.Open(abs)` and delete the now-redundant `st, _ := f.Stat()` / `st.IsDir()` lines, keeping `st` from the Lstat for Size() and the `truncated` computation. openNoFollow returns *os.File O_RDONLY so the ReadFull logic is unchanged; remote paths never reach this branch (resolve rejects them). Add `errors` to mcp.go imports if not present.",
+  "notes": "Merges three duplicate reports plus the nil-Stat finding. resolveFor only does a point-in-time EvalSymlinks check; every other byte-serving path (serveFile, hashFile, makeThumb, streamZipMany) uses openNoFollow, and TestOpenNoFollow (security_test.go:435) pins exactly this swap attack. Verified os.Open at mcp.go:419 and discarded Stat error at 424."
+ },
+ {
+  "file": "thumbs.go",
+  "line": 181,
+  "title": "exifOrientation panics (index out of range) on a crafted JPEG APP1 segment with size 15",
+  "kind": "crash-on-hostile-input",
+  "severity": "P1",
+  "fix": "In exifOrientation (thumbs.go:181), change the guard `size > 14` to `size >= 16`. Reason: `t := b[i+10 : i+2+size]` has len(t)=size-8, and line 192 reads `bo.Uint32(t[4:])`, which needs len(t) >= 8, i.e. size >= 16 (the TIFF header is 8 bytes). All later reads are already bounded by the `off+2 > len(t)` and `e+12 > len(t)` checks. Preserve the `string(b[i+4:i+10]) == \"Exif\\x00\\x00\"` condition unchanged.",
+  "notes": "Verified: size==15 gives len(t)=7, t[4:] has 3 bytes, binary.*.Uint32 does `_ = b[3]` and panics. Reachable by any user via /api/thumb and by anonymous recipients via /s/{id}/thumb on any file named *.jpg; net/http recovers per request, so it aborts responses and spams logs rather than crashing."
+ },
+ {
+  "file": "devices.go",
+  "line": 855,
+  "title": "API tokens minted by a paired phone survive revoking that phone",
+  "kind": "authz",
+  "severity": "P2",
+  "fix": "Tie link tokens to the device that minted them and delete them with it: (1) in migrateUsers (users.go:62-68) add `ALTER TABLE tokens ADD COLUMN device_id TEXT NOT NULL DEFAULT ''` to the ignored-error ALTER list; (2) in apiDeviceLinkToken (devices.go:855) change the INSERT to `INSERT INTO tokens(name,hash,created,user_id,scope,device_id) VALUES(?,?,?,?,?,?)` passing ai.deviceID; (3) in apiRevokeDevice (devices.go:412) and apiDeviceUnpair (devices.go:836) add `_, _ = a.st.exec(\"DELETE FROM tokens WHERE device_id=?\", id)` next to the device DELETE; (4) in revokeDevices (devices.go:141-145) add `_, _ = a.st.exec(\"DELETE FROM tokens WHERE device_id IN (SELECT id FROM devices WHERE user_id=?)\", userID)` BEFORE the `DELETE FROM devices` line. Tokens made via apiNewToken get device_id '' and are never matched. Keep TestAccountRecoveryRevokesTokens passing (admin password reset already deletes all the user's tokens).",
+  "notes": "Verified: the token row records only user_id (devices.go:851-855) and none of the three device-revocation paths touch the tokens table, so the lost-phone remediation leaves a standing read+write REST token alive. The admin-reset path (users.go:543) shows token revocation is the intended recovery behavior."
+ },
+ {
+  "file": "tokens.go",
+  "line": 183,
+  "title": "shareInScope fails open for folder-limited tokens when itemPaths swallows a database error",
+  "kind": "robustness",
+  "severity": "P2",
+  "fix": "Change itemPaths (collections.go:127-140) to `func (a *App) itemPaths(id string) ([]string, error)`: return the Query error instead of nil, and return `out, rows.Err()` after the loop. In shareInScope (tokens.go:183) fail closed: `paths, err := a.itemPaths(s.ID); if err != nil { return false }` then range paths. At the other call sites \u2014 sources (collections.go:161), collectionView, and mcpCall's add/remove_from_shared_folder result (mcp.go:506) \u2014 ignore the error and treat it as an empty list, preserving today's behavior there.",
+  "notes": "Verified: itemPaths returns nil on Query error and never checks rows.Err(); ranging over nil at tokens.go:183-188 runs zero covers() checks and returns true, so on a DB read error a folder-limited token can view/patch/revoke/delete collections entirely outside its folders (ownedShare gates on shareInScope, shares.go:126)."
+ },
+ {
+  "file": "api.go",
+  "line": 788,
+  "title": "apiRaw, share dl/raw and thumbnails open non-regular files: a FIFO in the library blocks the handler goroutine forever",
+  "kind": "robustness",
+  "severity": "P2",
+  "fix": "Require regular files before opening: (1) apiRaw (api.go:788): change the condition to `if err != nil || info.IsDir() || !info.Mode().IsRegular() { httpErr(w, 404, \"not found\"); return }`; (2) handleShare's \"dl\", \"raw\" case (shares.go:632-641): after the IsDir check add `if !info.Mode().IsRegular() { httpErr(w, 404, \"not found\"); return }`; (3) serveThumb (thumbs.go:36): extend the guard to `info.IsDir() || !info.Mode().IsRegular() || !thumbExts[ext] || info.Size() > 200<<20`. apiZip and apiSyncHash already check IsRegular; listDir already hides non-regular entries, so nothing user-visible changes.",
+  "notes": "Verified: open(2) O_RDONLY on a writer-less FIFO blocks indefinitely, the server sets no Read/Write timeouts (main.go:205-211), and resolve's exactName accepts FIFOs via Readdirnames. Downgraded from P1: an attacker needs a FIFO already inside the data mount (created out-of-band), though backed-up home dirs contain them in normal NAS life."
+ },
+ {
+  "file": "remote.go",
+  "line": 891,
+  "title": "Connected-Burrow HTTP client has no response-header timeout; a stalled peer wedges the remote library while holding remoteLib.mu",
+  "kind": "concurrency",
+  "severity": "P2",
+  "fix": "In pinnedClient (remote.go:875-892), after `tr := http.DefaultTransport.(*http.Transport).Clone()` add `tr.ResponseHeaderTimeout = 60 * time.Second` (add the time import if missing). This bounds time-to-first-header on every burrowFS call without limiting streamed bodies, so large /api/raw downloads and chunk uploads still work. Do not set Client.Timeout (it would cut long streams).",
+  "notes": "Verified: dialBurrow issues b.call under l.mu via remoteLib.do (remote.go:150-157), and the cloned transport bounds only connect (30s) and TLS handshake (10s). A peer that accepts TLS and never sends headers blocks l.mu; every later stat/list/open and apiRemotes (remote.go:333) then blocks too, leaking a goroutine each. Downgraded from P1: a crashed peer is detected by TCP keepalives, so the forever-hang needs a live-but-stalled peer, and the wedge is per-feature, not server-wide."
+ },
+ {
+  "file": "api.go",
+  "line": 527,
+  "title": "saveRoots permanently drops an enabled library root whose mount is temporarily offline, and the next scan deletes its index subtree",
+  "kind": "robustness",
+  "severity": "P2",
+  "fix": "In availableRoots (api.go:516-531), after the ReadDir loop, append every currently-enabled root that ReadDir did not produce: build `seen := map[string]bool{}` from the appended names, then `for _, r := range a.idx.enabledRoots() { if !seen[r] { out = append(out, rootInfo{Name: r, Enabled: true}) } }` before the sort. Because saveRoots (api.go:600-613) builds its `valid` set from this same function, an offline-but-enabled root submitted by the Settings UI now survives the save, and the checkbox stays visible so an admin can still deliberately uncheck a truly removed root. Edge cases: pre-setup there are no enabled roots, so setup behavior is unchanged; checkRemote's name-collision check now also reserves offline root names, which is correct.",
+  "notes": "Verified: availableRoots is a live os.ReadDir, saveRoots filters against it, app.js renders checkboxes from it, and apiPutSettings (api.go:1021-1023, 1034-1036) calls saveRoots then Rescan; fullScan deletes the whole subtree of a root missing from the saved list (indexer.go:276-279). Offline autofs/USB/network sub-mounts are normal NAS operation."
+ },
+ {
+  "file": "shares.go",
+  "line": 277,
+  "title": "Re-registering a deleted link's custom slug inherits the previous link's visitor history (cross-user IP/UA leak)",
+  "kind": "privacy",
+  "severity": "P2",
+  "fix": "In createShare's custom-slug branch (shares.go:269-279), after the existing `SELECT count(*) FROM shares WHERE id=?` check, also run `_ = a.st.db.QueryRow(\"SELECT count(*) FROM share_events WHERE share_id=?\", s).Scan(&n)` and return the same errors.New(\"that link name is taken\") when n > 0. Random 12-char ids are unaffected, and TestDeletingALinkKeepsItsHistory still passes (admins keep seeing deleted links' events; this only blocks a NEW share from adopting an id that has history). Note the side effect: an owner cannot reuse their own deleted slug until its events are pruned (365 days) \u2014 acceptable, since shareEvents attributes events purely by share_id.",
+  "notesarg": "",
+  "notes": "Verified: apiDeleteShare keeps share_events (api.go:1183), the slug check looks only at live shares (shares.go:274), and shareEvents filters `share_id=?` after an ownedShare check on the NEW share, so a user claiming a deleted slug sees the prior link's recipients' IPs, UAs and file names \u2014 and can probe deliberately."
+ },
+ {
+  "file": "tether.go",
+  "line": 259,
+  "title": "Toggling tether off then on within ~5s bricks it: the old run()'s cleanup nils t.stdin and closes pending calls after the new bridge registered",
+  "kind": "concurrency",
+  "severity": "P2",
+  "fix": "In run()'s exit cleanup (tether.go:259-265), only clear state that still belongs to this run, keyed on the local stdin pipe: `t.mu.Lock(); if t.stdin == stdin { t.stdin, t.id = nil, \"\"; for k, ch := range t.pending { close(ch); delete(t.pending, k) } }; t.mu.Unlock()`. stdin is already a local variable in run(). Edge to preserve: when this run never reached \"ready\" (t.stdin was never set to this stdin), its pending map entries can only have been created against an earlier registration, so the guard is still correct; and if the new bridge registered first, its pending calls survive.",
+  "notes": "Verified: set(false) cancels and set(true) immediately starts a new supervise without waiting (tether.go:109-122); the new run() sets t.stdin within ~100ms (tether.go:244) while the old bridge takes up to 5s to die, then the old cleanup unconditionally stomps it, after which call() returns errTetherOff forever. tether_test.go only tests a single off. The related t.done overwrite in set() only weakens stop()'s shutdown wait and can be left alone."
+ },
+ {
+  "file": "indexer.go",
+  "line": 315,
+  "title": "refreshCounts full-table sum() over files runs after every write op and every 2s while anyone browses",
+  "kind": "performance",
+  "severity": "P2",
+  "fix": "Throttle the dirty-path recounts: add `countsAt time.Time` to Indexer. Split out `func (ix *Indexer) recount()` holding the current query+status update, and make refreshCounts do: under ix.mu, if `time.Since(ix.countsAt) < 30*time.Second` return; else set `ix.countsAt = time.Now()`, unlock, and call recount(). In fullScan (indexer.go:301) call recount() directly (and reset countsAt) so end-of-scan totals stay exact. The counts only feed the admin status display (IndexStatus.Files/Dirs/Bytes), so 30s staleness is harmless.",
+  "notes": "Verified: the sum() aggregate cannot use an index (count(*) can, sum cannot), Refresh runs it after every mkdir/move/delete/upload, and dirtyLoop runs it every 2s whenever anything is dirty \u2014 and listDir Touches every browsed folder (files.go:185), so plain browsing keeps it firing. Downgraded from P1: it is read-only load (~180ms/call at 1M rows per the auditor's measurement), not a failure."
+ },
+ {
+  "file": "writes.go",
+  "line": 1310,
+  "title": "apiSyncChanged reports changed=true forever while the changes table is empty, forcing phones to re-walk the folder on every poll",
+  "kind": "performance",
+  "severity": "P2",
+  "fix": "Seed a sentinel change row so max(id) is never 0: in fullScan, right after `ix.st.set(\"initial_scan_done\", \"1\")` (indexer.go:298), and again at the end of pruneChanges (indexer.go:323-327), check `SELECT count(*) FROM changes` and if 0 run `INSERT INTO changes(ts,kind,path,is_dir,size) VALUES(?, 'scan', '', 0, 0)` with now(). The empty path stays invisible everywhere: changes() filters rows through a.idx.allowed(c.Path), which is false for \"\" (indexer.go:135-136), and apiSyncChanged's hit query matches only `path = rel OR prefix` where rel is never \"\" (resolve refuses it). No wire-format or app change.",
+  "notes": "Verified: the initial scan logs nothing (logChanges requires initial_scan_done, indexer.go:258), so cursor is 0; with since=0 the expression at writes.go:1310 (`hit > 0 || since <= 0 || ...`) is always true and every poll triggers a full apiSyncList WalkDir (up to 300k files). Recurs if pruneChanges empties the log after 180 quiet days. TestSyncListing uploads before polling, so it does not pin the bug."
+ },
+ {
+  "file": "indexer.go",
+  "line": 571,
+  "title": "inotify queue overflow is only logged; the index silently stays stale until the next full scan (default 6 hours)",
+  "kind": "robustness",
+  "severity": "P2",
+  "fix": "In watchLoop's error case (indexer.go:567-571), after the `log.Printf(\"watch: %v\", err)` line add: `if errors.Is(err, fsnotify.ErrEventOverflow) { ix.Rescan() }`. Both errors and fsnotify are already imported. Rescan() is the existing non-blocking kick channel, so the reconciling full scan starts as soon as the current one (if any) ends; repeated overflows coalesce into one queued kick.",
+  "notes": "Verified: fsnotify v1.10.1 (go.mod) delivers ErrEventOverflow on the Errors channel when the kernel queue overflows, meaning events were dropped \u2014 exactly what a bulk rsync/mass delete does \u2014 and dropped events never reach Touch(), so browse/search/changelog stay stale for up to BURROW_SCAN_HOURS (default 6)."
+ },
+ {
+  "file": "indexer.go",
+  "line": 213,
+  "title": "Data race on Indexer.w: written unlocked by the indexer goroutine, read unlocked from HTTP handler goroutines via Refresh -> scanDir -> addWatch",
+  "kind": "concurrency",
+  "severity": "P2",
+  "fix": "Publish and read ix.w under the existing mutex. In run() (indexer.go:212-216), set it inside the lock: `ix.mu.Lock(); ix.w = w; ix.status.Watching = true; ix.mu.Unlock()`. In addWatch (indexer.go:513-523), take the lock once at the top, copy to a local, and do the nil/watched/wFull checks there: `ix.mu.Lock(); w := ix.w; if w == nil || ix.watched[abs] || ix.wFull { ix.mu.Unlock(); return }; ix.mu.Unlock()`, then call `w.Add(abs)` on the local and keep the existing ENOSPC error branch and the final `ix.watched[abs] = true` locked section unchanged. run()'s own reads at 227-228 and watchLoop's channel reads are same-goroutine/happens-before and need no change.",
+  "notes": "Verified: run() assigns ix.w at 213 with no lock while handlers concurrently reach addWatch's unlocked reads at 514 and 523 (writes.go and files.go call Refresh/Touch from request goroutines). The practical window is startup, but it is a genuine Go memory-model race that -race flags."
+ },
+ {
+  "file": "shares.go",
+  "line": 309,
+  "title": "createShare commits the share row before its items: a failure in addItems leaves a live partial collection and burns the custom slug",
+  "kind": "correctness",
+  "severity": "P3",
+  "fix": "In createShare (shares.go:308-312), delete the row when addItems fails: `if err := a.addItems(u, id, in.Items, u); err != nil { _, _ = a.st.exec(\"DELETE FROM share_items WHERE share_id=?\", id); _, _ = a.st.exec(\"DELETE FROM shares WHERE id=?\", id); return Share{}, err }`. The share_items delete also clears any items inserted before the failing one (addItems inserts one at a time). Keep the pre-check loop at shares.go:255-259 as the primary validation.",
+  "notes": "Verified: the INSERT at shares.go:303 commits immediately and addItems re-resolves each path on disk and inserts per-item, so it can fail after the row exists; retrying the same custom slug then hits 'that link name is taken'. Downgraded to P3: requires a race or DB/disk error mid-create. The 3-line cleanup is preferred over a transaction rewrite."
+ },
+ {
+  "file": "mcp.go",
+  "line": 266,
+  "title": "MCP tool errors and apiCreateShare echo raw *fs.PathError text containing server-internal absolute paths",
+  "kind": "info-leak",
+  "severity": "P3",
+  "fix": "Two choke points: (1) in resolve (files.go:33-36), replace `return \"\", \"\", err` after EvalSymlinks with `return \"\", \"\", fs.ErrNotExist` (add io/fs import if needed) \u2014 callers already treat resolve failure as not-found, and the errors.Is(errNotAllowed) branches are unaffected; (2) add a small helper `func pubErr(err error) error { var pe *fs.PathError; if errors.As(err, &pe) { return fmt.Errorf(\"%s: %s\", pe.Op, pe.Err) }; return err }` and use it in mcpDispatch (mcp.go:266): `\"text\": \"Error: \" + pubErr(err).Error()`. This covers os.Open/os.Stat/os.ReadDir errors from every tool branch (read_text_file, file_info, list_directory). Edge: keep wrapped sentinel errors (errNotAllowed etc.) intact \u2014 errors.As only matches PathError.",
+  "notes": "Verified: mcp.go:266 returns err.Error() verbatim; file_info (391-394) and list_directory (377-380 via listDir's raw os.ReadDir) surface PathErrors with DataDir-absolute paths; resolve's raw EvalSymlinks error also reaches REST clients through apiCreateShare (api.go:1143 + shares.go:229). Non-admins are otherwise never shown DataDir. Downgraded to P3: disclosure only, to authenticated token holders."
+ },
+ {
+  "file": "shares.go",
+  "line": 339,
+  "title": "patchShare runs up to 7 separate UPDATEs per PATCH and discards every error, so a failed or partial write returns 200",
+  "kind": "correctness",
+  "severity": "P3",
+  "fix": "Rewrite the body of patchShare (shares.go:338-378) to accumulate one statement: replace the `set` closure with `var sets []string; var args []any; set := func(col string, v any) { sets = append(sets, col+\"=?\"); args = append(args, v) }`, keep every existing field branch (including the bcrypt error return and the AllowUpload admin check) unchanged, then at the end: `if len(sets) == 0 { return nil }; _, err := a.st.exec(\"UPDATE shares SET \"+strings.Join(sets, \", \")+\" WHERE id=?\", append(args, id)...); return err`. Column names stay code literals; values stay placeholders. Result: atomic multi-field PATCH and errors reach apiPatchShare's caller.",
+  "notes": "Verified: `_, _ = a.st.exec(...)` at shares.go:339 drops errors, each field is its own implicit transaction, and apiPatchShare responds 200 with the reloaded (unchanged) share on silent failure."
+ },
+ {
+  "file": "files.go",
+  "line": 497,
+  "title": "rows.Err() never checked after result loops: change log, link history and token list silently truncate on a cursor error",
+  "kind": "robustness",
+  "severity": "P3",
+  "fix": "Replace the final `return out, nil` with `return out, rows.Err()` in changes (files.go:497) and shareEvents (shares.go:439). In apiTokens (tokens.go:241-256), after the loop add `if err := rows.Err(); err != nil { httpErr(w, 500, err.Error()); return }` before writeJSON. Leave favoriteSet and decorate best-effort (they only decorate listings). Edge: changes() already returns early scan errors; this only adds the end-of-cursor check.",
+  "notes": "Verified: all three loops end with an unconditional success return, while search (files.go:431) and listDevices (devices.go:370) do check rows.Err(), so this is the codebase's own convention. A mid-scan SQLite I/O error currently returns a truncated result as success."
+ },
+ {
+  "file": "api.go",
+  "line": 667,
+  "title": "Sign-in attempts are never logged: no trace of brute-force or successful logins, fail2ban impossible",
+  "kind": "observability",
+  "severity": "P3",
+  "fix": "In apiLogin (api.go:646-693): before the 401 at line 667 add `log.Printf(\"login failed for %q from %s\", trunc(strings.TrimSpace(in.User), 64), a.clientIP(r))`; before the 401 at line 686 (wrong/reused 2FA code) add `log.Printf(\"login 2fa failed for %s from %s\", u.Name, a.clientIP(r))`; after a.newSession at line 691 add `log.Printf(\"login: %s from %s\", u.Name, a.clientIP(r))`. log, trunc and clientIP are already available in api.go. Volume is bounded by the existing limiter (8/15min per IP, 30/h per account).",
+  "notes": "Verified: no login-related log.Print exists anywhere, while less sensitive events (device pairing) are logged and share password failures are recorded as events. Downgraded to P3: observability gap, not a vulnerability."
+ },
+ {
+  "file": "shares.go",
+  "line": 589,
+  "title": "Share password is accepted from the URL query string, not just the POST body",
+  "kind": "hardening",
+  "severity": "P3",
+  "fix": "In handleShare's auth branch (shares.go:589), replace `r.FormValue(\"password\")` with `r.PostFormValue(\"password\")`. Also change the two `r.FormValue(\"p\")` reads in that branch (lines 591 and 599) to `r.PostFormValue(\"p\")` only if desired for consistency \u2014 the password line is the one that matters. The legit form (web/share.html:37-43) posts in the body, so existing tests and clients keep working.",
+  "notes": "Verified: FormValue falls back to query parameters, so `POST /s/<id>/auth?password=<pw>` unlocks the link and sets the 12h cookie, putting link passwords into reverse-proxy logs and browser history on the public port."
+ },
+ {
+  "file": "transfer.go",
+  "line": 249,
+  "title": "remoteSide.put defeats its own no-retry rule: on a cold connection, remoteLib.do can rerun Put with a half-consumed reader",
+  "kind": "correctness",
+  "severity": "P3",
+  "fix": "In remoteSide.put (transfer.go:244-252), make the cold-connection fallback single-shot so do() can still dial but never rerun the body: `tried := false; return s.l.do(func(c remoteFS) error { if tried { return fmt.Errorf(\"upload interrupted: %w\", io.ErrUnexpectedEOF) }; tried = true; return c.Put(in, r, size, mtime) })`. io and fmt are already imported in transfer.go. Keep the warm-connection direct-call path unchanged.",
+  "notes": "Verified: do() (remote.go:148-174) retries fn once on any non-file error, so a mid-upload connection drop on the dial path reruns Put with the drained reader; burrowFS.Put then advances offsets wrongly and the 409 maps to fs.ErrExist, giving the user a misleading 'already exists' failure. No corruption (size checks hold), just a guaranteed-wrong retry and error."
+ },
+ {
+  "file": "remote.go",
+  "line": 152,
+  "title": "loadRemotes closes libs still used by in-flight requests; do()'s retry then redials on the orphaned lib and that connection leaks until restart",
+  "kind": "concurrency",
+  "severity": "P3",
+  "fix": "Add `closed bool` to remoteLib (remote.go:136-144). In close() (remote.go:176-183) set `l.closed = true` under l.mu. In do()'s dial branch (remote.go:150-158), before dialing when `c == nil`, add: `if l.closed { l.mu.Unlock(); return fmt.Errorf(\"can't reach %s: %w\", l.Name, errRemoteDown) }`. The in-flight caller sees the normal 'NAS isn't answering' error and the client's next request goes through the new registry entry.",
+  "notes": "Verified: loadRemotes swaps the map then closes old libs (remote.go:217-223); an in-flight do() whose fn fails after close finds l.conn==nil (so the `l.conn == c` cleanup is skipped) and the try=1 loop dials a fresh SMB session/HTTP client on a lib nothing references or will ever close. One leaked session per connection-edit racing an in-flight browse."
+ },
+ {
+  "file": "shares.go",
+  "line": 426,
+  "title": "Per-link and per-owner link-history queries sort with a temp B-tree instead of using the (share_id, ts) index",
+  "kind": "performance",
+  "severity": "P3",
+  "fix": "In shareEvents (shares.go:404-427), choose the order by whether any share filter was added: replace `q += \\` ORDER BY id DESC LIMIT ?\\`` with `order := \"id DESC\"; if len(args) > 0 { order = \"ts DESC, id DESC\" }; q += \" ORDER BY \" + order + \" LIMIT ?\"`. len(args) > 0 exactly when a share_id / owner / folder condition exists; those queries are then served backward from the share_events_share(share_id, ts) index with no temp B-tree (equal-ts entries are rowid-ordered, so the result order is identical except across a backward clock step). The admin everything-listing keeps `id DESC`, which is a reverse rowid scan with early LIMIT stop and would regress under ts ordering (no ts-only index).",
+  "notes": "Verified: index is (share_id, ts) (store.go:82), ORDER BY id DESC at shares.go:426 forces USE TEMP B-TREE for the filtered forms, share_events rows are kept 365 days with no row cap, and the auditor measured 150.6ms -> 12.6ms for the non-admin owner listing at 1M events."
+ },
+ {
+  "file": "collections.go",
+  "line": 598,
+  "title": "Interrupted cross-mount copies and text writes leave hidden .burrow-part-* files in library folders forever",
+  "kind": "correctness",
+  "severity": "P3",
+  "fix": "Extend cleanPartials (collections.go:598-615, run daily from maintain) to also sweep: (a) each enabled library root \u2014 filepath.WalkDir from filepath.Join(a.cfg.DataDir, root), skipping directories whose name a.idx.excluded() matches EXCEPT that the walk must still inspect files (partPrefix names are themselves excluded, so check file names with strings.HasPrefix(name, partPrefix+\"text-\") || strings.HasPrefix(name, partPrefix+\"up-cp-\") directly), os.Remove regular files with those prefixes whose ModTime is older than 24h; and (b) the remote-parts dir (a.remotePartsDir(), remote_ops.go:367) with the same rule. Do NOT touch `.burrow-part-up-<id>` files elsewhere: those are resumable uploads with DB rows that dropUpload/purge handles ('cp-' slugs from randSlug contain no '-', so the up-cp- prefix is unambiguous). Edge: skip symlinked directories as the existing code does.",
+  "notes": "Verified: localSide.put (transfer.go:163) and writeText (writes.go:568) write temp files into the destination library folder and remove them only on in-process errors; cleanPartials sweeps only one level under DropDir; and excluded() hides every .burrow- name from listings/search/index, so leaked files are invisible to admins. A crash or power loss mid-copy leaks them permanently."
+ },
+ {
+  "file": "api.go",
+  "line": 348,
+  "title": "Setting an admin network list (admin_cidrs) silently disables the 'web UI on public port' and 'MCP on public port' switches",
+  "kind": "config-interaction",
+  "severity": "P3",
+  "fix": "In secure() (api.go:344-356), after computing `public`, treat requests that arrived on the public listener for an explicitly published surface as public: `if !public && publicListener(r) && (a.publicUI.Load() || (p == \"/mcp\" && a.publicMCP.Load())) { public = true }`. publicListener/markPublic already exist (devices.go:617-629) and markPublic wraps the public dispatcher before full.ServeHTTP, so the context value is visible inside secure(). admin_cidrs then still guards everything on the LAN port and everything not explicitly published. If maintainers instead decide admin_cidrs is a deliberate global gate, the minimal alternative is to apply only the /mcp clause (MCP carries its own token auth) and warn in apiPutSettings when publicUI and admin_cidrs are both set.",
+  "notes": "Verified: publicRoutes routes /mcp and the whole UI through a.routes() = a.secure(mux), secure 403s every non-public path outside admin_cidrs, and the settings validation forces the admin's own (typically LAN) address into the list \u2014 so the two public toggles become no-ops while verify-public prints 'MCP is public (403)' as if working (verify.go:192)."
+ },
+ {
+  "file": "mcp.go",
+  "line": 171,
+  "title": "MCP request bodies over 1 MB are silently truncated, yielding a misleading JSON-RPC parse error",
+  "kind": "robustness",
+  "severity": "P3",
+  "fix": "In handleMCP (mcp.go:171-175), replace `io.ReadAll(io.LimitReader(r.Body, 1<<20))` with `io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))`, and in the error branch handle the size case first: `var mbe *http.MaxBytesError; if errors.As(err, &mbe) { httpErr(w, http.StatusRequestEntityTooLarge, \"request too large (1 MB max)\"); return }` before the existing `httpErr(w, 400, \"bad body\")`. Add the errors import to mcp.go if missing.",
+  "notes": "Verified: LimitReader truncates without error, so an oversized write_text_file call is cut mid-JSON and answered with {-32700, parse error}; every other body-reading path in the codebase already uses MaxBytesReader (api.go:122, devices.go:421, shares.go:588)."
+ },
+ {
+  "file": "tokens.go",
+  "line": 282,
+  "title": "POST /api/tokens ignores JSON decode errors and mints a default full-scope token from a malformed body",
+  "kind": "input-validation",
+  "severity": "P3",
+  "fix": "In apiNewToken (tokens.go:282), replace `_ = readJSON(r, &in)` with `if err := readJSON(r, &in); err != nil && !errors.Is(err, io.EOF) { httpErr(w, 400, \"bad request\"); return }` \u2014 io.EOF keeps an intentionally empty body working (it still mints the default token, today's documented behavior). Add `io` to tokens.go's imports (errors is already imported).",
+  "notes": "Verified: a broken body (or a mistyped scope field that aborts decoding before Scope is set) currently creates a live token named 'token' with fullScope() \u2014 every tool in ask mode, API=true, all folders \u2014 instead of a 400. Session-gated endpoint, so P3."
+ },
+ {
+  "file": "thumbs.go",
+  "line": 132,
+  "title": "Thumbnail pixel-count guard computes Width*Height in int, overflowing on 32-bit builds and leaving single dimensions uncapped",
+  "kind": "resource-exhaustion",
+  "severity": "P3",
+  "fix": "In thumbFrom (thumbs.go:132), change the guard to `if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > 30000 || cfg.Height > 30000 || int64(cfg.Width)*int64(cfg.Height) > 60_000_000 {`. The int64 multiply removes the 32-bit wraparound (a 60000x60000 header wraps negative and passes today on GOARCH=arm/386), and the per-dimension cap bounds decoder allocations for degenerate 1xN images.",
+  "notes": "Verified the int arithmetic at thumbs.go:132. Downgraded to P3: the overflow only bites 32-bit builds (plausible on older ARMv7 NAS hardware for a pure-Go binary), and the 60MP acceptance on 64-bit is the intended limit."
+ },
+ {
+  "file": "main.go",
+  "line": 123,
+  "title": "burrow backup writes the DB snapshot (password hashes, 2FA secrets) with default permissions for the whole VACUUM duration",
+  "kind": "security",
+  "severity": "P3",
+  "fix": "In the backup case in main() (main.go:113-130), set the process umask before opening the store: add `syscall.Umask(0o077)` right after parsing the arguments (syscall is already imported; no restore needed, the process exits). SQLite's VACUUM INTO then creates the target 0600 from the first byte. Keep the existing trailing os.Chmod as a safety net, and log its error instead of discarding it: `if err := os.Chmod(os.Args[2], 0o600); err != nil { log.Print(err) }`.",
+  "notes": "Verified: os.MkdirAll(0o750) only helps when the directory is created by this call; the snapshot is created with umask-default permissions and only chmod'd after VACUUM completes (minutes on a large index), and the code's own comment says the file holds password hashes and 2FA secrets. Linux-only codebase, so Umask is fine."
+ }
+]
