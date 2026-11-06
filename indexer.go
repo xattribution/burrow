@@ -71,6 +71,7 @@ type Indexer struct {
 	status   IndexStatus
 	excludes []string
 	roots    map[string]bool
+	countsAt time.Time
 
 	kick    chan struct{}
 	dirtyMu sync.Mutex
@@ -296,9 +297,13 @@ func (ix *Indexer) fullScan() {
 	}
 	if scanErr == nil {
 		ix.st.set("initial_scan_done", "1")
+		ix.seedChange()
 	}
 	ix.pruneChanges()
-	ix.refreshCounts()
+	ix.mu.Lock()
+	ix.countsAt = time.Now()
+	ix.mu.Unlock()
+	ix.recount()
 
 	ix.mu.Lock()
 	ix.status.Scanning = false
@@ -313,6 +318,17 @@ func (ix *Indexer) fullScan() {
 }
 
 func (ix *Indexer) refreshCounts() {
+	ix.mu.Lock()
+	if time.Since(ix.countsAt) < 30*time.Second {
+		ix.mu.Unlock()
+		return
+	}
+	ix.countsAt = time.Now()
+	ix.mu.Unlock()
+	ix.recount()
+}
+
+func (ix *Indexer) recount() {
 	var files, dirs, bytes int64
 	_ = ix.st.db.QueryRow(`SELECT coalesce(sum(is_dir=0),0), coalesce(sum(is_dir=1),0), coalesce(sum(size),0) FROM files`).Scan(&files, &dirs, &bytes)
 	ix.mu.Lock()
@@ -324,6 +340,20 @@ func (ix *Indexer) pruneChanges() {
 	_, _ = ix.st.exec(`DELETE FROM changes WHERE ts < ?`, now()-180*86400)
 	_, _ = ix.st.exec(`DELETE FROM changes WHERE id <= (SELECT id FROM changes ORDER BY id DESC LIMIT 1 OFFSET 500000)`)
 	_, _ = ix.st.exec(`DELETE FROM share_events WHERE ts < ?`, now()-365*86400)
+	ix.seedChange()
+}
+
+// seedChange keeps the change log non-empty once logging is live, so sync
+// cursors handed out by apiSyncChanged never fall back to zero.
+func (ix *Indexer) seedChange() {
+	if ix.st.get("initial_scan_done") != "1" {
+		return
+	}
+	var n int64
+	_ = ix.st.db.QueryRow(`SELECT count(*) FROM changes`).Scan(&n)
+	if n == 0 {
+		_, _ = ix.st.exec(`INSERT INTO changes(ts,kind,path,is_dir,size) VALUES(?,'scan','',0,0)`, now())
+	}
 }
 
 type existingRow struct {
@@ -567,6 +597,9 @@ func (ix *Indexer) watchLoop(ctx context.Context) {
 				return
 			}
 			log.Printf("watch: %v", err)
+			if errors.Is(err, fsnotify.ErrEventOverflow) {
+				ix.Rescan()
+			}
 		}
 	}
 }
