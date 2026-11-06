@@ -135,7 +135,16 @@ addEventListener('popstate', () => route());
 // ---------- boot / gate screens ----------
 let ME = null;
 async function boot() {
-  const st = await fetch('/api/state').then(r => r.json());
+  let st;
+  try {
+    const r = await fetch('/api/state');
+    st = await r.json();
+  } catch {
+    gate(h('form', {}, h('h1', {}, h('img', { src: '/favicon.svg', alt: '' }), 'Burrow'),
+      h('p', { class: 'err', role: 'alert' }, 'Can’t reach the server. Check Burrow and your network.'),
+      h('button', { class: 'btn primary', type: 'button', onclick: () => boot() }, 'Retry')));
+    return;
+  }
   ME = st;
   if (!st.setup_done) return setupScreen(st);
   if (!st.signed_in) return loginScreen();
@@ -162,8 +171,11 @@ function loginScreen() {
   f.addEventListener('submit', async e => {
     e.preventDefault();
     err.textContent = '';
-    const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Burrow': '1' }, body: JSON.stringify({ user: f.user.value, password: f.password.value, code: f.code.value }) });
-    const d = await r.json().catch(() => ({}));
+    let r, d;
+    try {
+      r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Burrow': '1' }, body: JSON.stringify({ user: f.user.value, password: f.password.value, code: f.code.value }) });
+      d = await r.json().catch(() => ({}));
+    } catch { err.textContent = 'Can’t reach Burrow — check your connection.'; return; }
     if (r.ok) { boot(); return; }
     if (d.need_code) { codeField.hidden = false; f.code.required = true; f.code.focus(); return; }
     err.textContent = d.error || 'Sign-in failed';
@@ -526,12 +538,16 @@ function addToFolderControl(e, done) {
 function expiryControl(defHours) {
   const opts = [['1', '1 hour'], ['24', '1 day'], ['168', '7 days'], ['720', '30 days'], ['-1', 'Never'], ['date', 'Pick a date']];
   const sel = h('select', { name: 'exp' }, opts.map(([v, l]) => h('option', { value: v }, l)));
-  const def = String(defHours || 168);
+  const def = defHours === 0 ? '-1' : String(defHours || 168);
   sel.value = opts.some(o => o[0] === def) ? def : (defHours > 0 ? '168' : '-1');
   const date = h('input', { type: 'datetime-local', name: 'expdate', hidden: true });
-  sel.addEventListener('change', () => { date.hidden = sel.value !== 'date'; });
+  sel.addEventListener('change', () => { date.hidden = sel.value !== 'date'; date.required = sel.value === 'date'; });
   const read = () => {
-    if (sel.value === 'date') { const t = Date.parse(date.value); return t ? { expires_at: Math.floor(t / 1000) } : { expires_hours: -1 }; }
+    if (sel.value === 'date') {
+      const t = Date.parse(date.value);
+      if (!t) { date.reportValidity(); throw new Error('Pick a date and time for the expiry.'); }
+      return { expires_at: Math.floor(t / 1000) };
+    }
     return { expires_hours: Number(sel.value) };
   };
   return { el: h('div', { class: 'row' }, sel, date), read };
@@ -716,8 +732,12 @@ async function openSharePanel(id) {
     if (f.max) body.max_downloads = Number(f.max.value || 0);
     if (f.up) body.allow_upload = f.up.checked;
     const sel = exp.el.querySelector('select').value;
-    if (sel !== 'keep') Object.assign(body, exp.read());
-    try { await api('/api/shares/' + id, { method: 'PATCH', body }); saved.textContent = 'Saved ' + new Date().toLocaleTimeString('en-US', { hour12: false }); changed(); } catch (e) { editErr.textContent = e.message; }
+    try {
+      if (sel !== 'keep') Object.assign(body, exp.read());
+      await api('/api/shares/' + id, { method: 'PATCH', body });
+      saved.textContent = 'Saved ' + new Date().toLocaleTimeString('en-US', { hour12: false });
+      changed();
+    } catch (e) { editErr.textContent = e.message; }
   });
   const contents = x.mode === 'collection' ? await collectionEditor(x, changed) : null;
   const target = x.mode === 'drop' || x.mode === 'collection'
@@ -972,7 +992,9 @@ async function openUserPanel(id) {
     h('h3', {}, 'Account'),
     h('dl', { class: 'facts' }, h('dt', {}, 'Created'), h('dd', {}, fullDate(u.created)), h('dt', {}, 'Two-factor'), h('dd', {}, u.two_factor ? 'On' : 'Off')),
     h('div', { class: 'row' },
-      u.two_factor ? h('button', { class: 'btn', type: 'button', onclick: async () => {
+      u.two_factor ? h('button', { class: 'btn', type: 'button', onclick: async ev => {
+        const b = ev.currentTarget;
+        if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really turn off two-factor'; return; }
         try { await api('/api/users/' + u.id, { method: 'PATCH', body: { reset_2fa: true } }); openUserPanel(id); viewUsers(getState(), routeSeq); } catch (x) { actErr.textContent = x.message; }
       } }, 'Turn off two-factor') : null,
       u.username !== ME.user ? h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
@@ -1116,7 +1138,11 @@ function tokenList(initial, tools, mcpURL) {
       h('td', { class: 'muted hide-s' }, t.last_used ? `Used ${fmtWhen(t.last_used)}${t.last_ip ? ' from ' + t.last_ip : ''}` : 'Never used'),
       h('td', { class: 'r' }, h('div', { class: 'row end' },
         h('button', { class: 'btn', type: 'button', onclick: () => tokenPanel(t, tools, mcpURL, reload) }, 'Edit'),
-        h('button', { class: 'btn danger', type: 'button', onclick: async () => { await api('/api/tokens/' + t.id, { method: 'DELETE' }); closePanel(false); reload(); } }, 'Delete'))))))) : null,
+        h('button', { class: 'btn danger', type: 'button', onclick: async ev => {
+          const b = ev.currentTarget;
+          if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = `Delete “${t.name}”`; return; }
+          await api('/api/tokens/' + t.id, { method: 'DELETE' }); closePanel(false); reload();
+        } }, 'Delete'))))))) : null,
     h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: () => tokenPanel(null, tools, mcpURL, reload) }, icon('plus'), 'New token')));
   draw(initial);
   return box;
