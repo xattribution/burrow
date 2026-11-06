@@ -21,7 +21,7 @@
 .crumbs { display: flex; align-items: center; gap: 2px; font-size: 15px; background: var(--surface); border-radius: 999px; padding: 4px 14px 4px 6px; min-block-size: 44px; max-inline-size: 100%; overflow-x: auto; scrollbar-width: none; } /* ledger: pill path bar, a control people tap; matches the phone's file manager */
 .crumbs a, .crumbs b { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); text-decoration: none; padding: 6px 8px; border-radius: 999px; white-space: nowrap; min-block-size: 36px; } /* ledger: pill segments inside the pill bar */
 .crumbs a:hover { background: var(--surface-2); color: var(--ink); }
-.crumbs b { color: var(--accent); }
+.crumbs b { color: var(--accent-text); }
 .crumbs .sep { inline-size: 14px; block-size: 14px; color: var(--ink-2); flex: none; }
 .crumbs .home { inline-size: 20px; block-size: 20px; fill: currentColor; stroke: none; }
 .crumbs a .home-label { display: none; }

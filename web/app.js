@@ -316,7 +316,7 @@ async function route() {
   if (q && document.activeElement !== q) q.value = s.view === 'search' ? s.q : '';
   delete $('#content').dataset.drop;
   const nk = s.view + '|' + s.path;
-  if (nk !== navKey) { navKey = nk; loadNav(); }
+  if (nk !== navKey) { navKey = nk; loadNav().catch(() => { navKey = null; }); }
   try {
     if (s.view === 'search') await viewSearch(s, seq);
     else if (s.view === 'shares') await viewShares(s, seq);
@@ -1410,6 +1410,7 @@ async function uploadFiles(dir, files) {
       const up = await api('/api/uploads', { method: 'POST', body: { dir, name: f.name, size: f.size, mtime: f.lastModified } });
       let off = 0, tries = 0;
       while (off < f.size) {
+        if (ctl.aborted) throw Object.assign(new Error('Cancelled'), { cancelled: true, up });
         try {
           const r = await fetch(`/api/uploads/${up.id}?offset=${off}`, { method: 'PUT', headers: { 'X-Burrow': '1' }, body: f.slice(off, Math.min(off + CHUNK, f.size)), signal: (ctl.ac = new AbortController()).signal });
           const d = await r.json().catch(() => ({}));
@@ -1736,7 +1737,7 @@ async function viewTrash(s, seq) {
     [['', 'Mine'], ['all', 'Everyone’s']].map(([k, l]) => h('button', { type: 'button', 'aria-pressed': (s.tab || '') === k ? 'true' : 'false', onclick: () => nav({ tab: k }, true) }, l))) : null;
   put($('#sub'), h('b', {}, 'Recently deleted'), seg, h('span', { class: 'grow' }), h('span', { class: 'muted hide-s' }, 'Kept for 30 days'));
   if (!items.length) { put($('#content'), emptyState('Nothing deleted in the last 30 days.', 'Deleted files and folders, and older versions replaced by uploads, wait here for 30 days.')); return; }
-  const err = h('p', { class: 'err' });
+  const err = errEl();
   put($('#content'), err, h('table', { class: 'files' },
     h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', { class: 'r hide-s' }, 'Size'), h('th', {}, 'Deleted'), all ? h('th', { class: 'hide-s' }, 'By') : null, h('th', {}))),
     h('tbody', {}, items.map(t => h('tr', {},
