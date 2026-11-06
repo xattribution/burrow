@@ -4,6 +4,8 @@ import io.github.xattribution.burrow.core.db.BurrowDb
 import io.github.xattribution.burrow.core.db.Pair as PairRow
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okio.BufferedSink
 import okio.Source
 import okio.buffer
@@ -42,6 +44,13 @@ interface LocalTree {
     /** Deletes a file, or a folder if it is empty. */
     suspend fun delete(path: String): Boolean
     suspend fun rename(from: String, to: String): Boolean
+
+    /**
+     * Names this tree itself hides from list(). The engine hides them on Burrow's
+     * side too, so a file the phone can't see is never read as "deleted here".
+     */
+    fun hides(path: String): Boolean =
+        path.split('/').any { it.startsWith(".burrow-") || it.startsWith(".pending-") || it.startsWith(".trashed-") }
 }
 
 data class SyncProgress(val phase: String, val done: Int, val total: Int, val bytes: Long, val totalBytes: Long, val current: String)
@@ -119,14 +128,14 @@ class SyncEngine(
             }
             excludes = l.excludes
             writable = l.writable
-            remote = l.entries.filterNot { excluded(it.path, excludes) }.associate { it.path to Remote(it.dir, Stamp(it.size, it.mtime), it.hash) }
+            remote = l.entries.filterNot { excluded(it.path, excludes) || local.hides(it.path) }.associate { it.path to Remote(it.dir, Stamp(it.size, it.mtime), it.hash) }
             q.setCursor(l.cursor, now(), pair.id)
         } else {
-            remote = base.mapValues { Remote(it.value.dir, it.value.r, it.value.hash) }
+            remote = base.filterNot { local.hides(it.key) }.mapValues { Remote(it.value.dir, it.value.r, it.value.hash) }
         }
 
         progress(SyncProgress("Checking the phone", 0, 0, 0, 0, ""))
-        val localList = local.list().filterNot { excluded(it.path, excludes) || it.path.split('/').any { s -> s.startsWith(".burrow-") || s.startsWith(".pending-") || s.startsWith(".trashed-") } }
+        val localList = local.list().filterNot { excluded(it.path, excludes) || local.hides(it.path) }
         val lmap = localList.associateBy { it.path }
 
         // where both sides have a file of the same size but different times, compare contents
@@ -384,7 +393,7 @@ class SyncEngine(
                 }
             }
         }
-        if (mode != SyncMode.DOWNLOAD) detectMoves(base, local, remote, acts)
+        if (mode != SyncMode.DOWNLOAD) detectMoves(base, local, remote, acts, tree)
         return acts
     }
 
@@ -423,7 +432,7 @@ class SyncEngine(
      * A file that disappeared from one path on the phone and appeared, unchanged,
      * at another is a move: move it on Burrow instead of uploading it again.
      */
-    private fun detectMoves(base: Map<String, Base>, local: Map<String, LocalEntry>, remote: Map<String, Remote>, acts: MutableList<Act>) {
+    private fun detectMoves(base: Map<String, Base>, local: Map<String, LocalEntry>, remote: Map<String, Remote>, acts: MutableList<Act>, tree: LocalTree) {
         val gone = base.filter { (p, b) -> !b.dir && local[p] == null && remote[p]?.stamp == b.r }
         if (gone.isEmpty()) return
         val news = acts.filterIsInstance<Upload>().filter { it.expect == null && base[it.path] == null && remote[it.path] == null }
@@ -434,6 +443,9 @@ class SyncEngine(
             val cands = byStamp[le.stamp]?.filter { it.key !in used } ?: continue
             if (cands.size != 1) continue
             val from = cands.single().key
+            // a matching stamp isn't proof: the new file must hold the moved file's bytes
+            val want = base.getValue(from).hash
+            if (want.isNotEmpty() && runCatching { Uploader.sha256 { tree.open(u.path) } }.getOrNull() != want) continue
             used += from
             acts.remove(u)
             acts.removeAll { (it is DelRemote && it.path == from) || (it is Forget && it.path == from) }
@@ -460,18 +472,25 @@ class SyncEngine(
         true
     }
 
-    suspend fun sync(pair: PairRow, local: LocalTree, progress: (SyncProgress) -> Unit = {}): SyncReport {
+    suspend fun sync(pair: PairRow, local: LocalTree, progress: (SyncProgress) -> Unit = {}): SyncReport = lockFor(pair.id).withLock {
+        // several workers can ask for the same pair at once; one runs at a time,
+        // and the row is read again under the lock so its base snapshot is fresh
+        val p = q.byId(pair.id).executeAsOneOrNull() ?: pair
         try {
-            val rep = run(pair, local, progress)
-            q.finished(now(), rep.errors.firstOrNull().orEmpty(), pair.id)
-            return rep
+            val rep = run(p, local, progress)
+            q.finished(now(), rep.errors.firstOrNull().orEmpty(), p.id)
+            rep
         } catch (e: Exception) {
-            q.finished(pair.last_sync, e.message ?: "sync failed", pair.id)
+            q.finished(p.last_sync, e.message ?: "sync failed", p.id)
             throw e
         }
     }
 
     companion object {
+        private val locksGuard = Mutex()
+        private val locks = mutableMapOf<Long, Mutex>()
+        private suspend fun lockFor(id: Long): Mutex = locksGuard.withLock { locks.getOrPut(id) { Mutex() } }
+
         /** Burrow's own default hidden names, used until the server's list is known. */
         val DEFAULT_EXCLUDES = listOf(".burrow-*", ".zfs", ".hist", "@eaDir", "#recycle", "#snapshot", ".Trash-*", "\$RECYCLE.BIN", "System Volume Information", ".DS_Store", "._*", "Thumbs.db", "desktop.ini", ".ix-apps", "lost+found")
 

@@ -117,7 +117,9 @@ class BurrowChannel(
             val bytes = r.body.readByteArray()
             when (r.code) {
                 200 -> bytes
-                401 -> throw NotPairedException("This phone was removed from Burrow. Pair it again.")
+                // only Burrow's own 401 means unpaired: a reverse proxy's 401 must not wipe the pairing
+                401 -> if (errorText(bytes, "") == "this device isn't paired") throw NotPairedException("This phone was removed from Burrow. Pair it again.")
+                else throw ChannelException(errorText(bytes, "Burrow answered 401."))
                 403 -> throw AccountDisabledException(errorText(bytes, "Your Burrow account is turned off."))
                 429 -> throw ChannelException("Too many attempts. Try again in 15 minutes.")
                 else -> throw ChannelException(errorText(bytes, "Burrow answered ${r.code}."))
@@ -258,7 +260,8 @@ class BurrowChannel(
                         renew = true // the server restarted or the session ran out: new handshake, same request
                         continue
                     }
-                    throw NotPairedException("This phone was removed from Burrow. Pair it again.")
+                    if (msg == "this device isn't paired") throw NotPairedException("This phone was removed from Burrow. Pair it again.")
+                    throw ChannelException(msg.ifEmpty { "Burrow answered 401." })
                 }
                 403 -> throw AccountDisabledException(resp.use { errorText(it.body.readByteArray(), "Your Burrow account is turned off.") })
                 else -> throw ChannelException(resp.use { errorText(it.body.readByteArray(), "Burrow answered ${it.code}.") })

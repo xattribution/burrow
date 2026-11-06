@@ -42,8 +42,10 @@ class PhoneTree(private val root: java.io.File, private val volumeTop: Boolean, 
     override suspend fun list(): List<LocalEntry> {
         check()
         // at the top of a volume, Android/ holds apps' own folders, which aren't the user's to sync
-        return files.list().filter { e -> e.path.split('/').none { it.startsWith(".") } && !(volumeTop && (e.path == "Android" || e.path.startsWith("Android/"))) }
+        return files.list().filter { e -> !hides(e.path) && !(volumeTop && (e.path == "Android" || e.path.startsWith("Android/"))) }
     }
+
+    override fun hides(path: String): Boolean = path.split('/').any { it.startsWith(".") }
 
     override suspend fun stat(path: String): LocalEntry? = files.stat(path)
     override fun open(path: String): Source = files.open(path)
@@ -158,7 +160,11 @@ class SafTree(private val cr: ContentResolver, private val tree: Uri) : LocalTre
             (cr.openOutputStream(tmp, "wt") ?: throw FileNotFoundException(path)).sink().buffer().use(body)
             idOf(path)?.let { DocumentsContract.deleteDocument(cr, doc(it)) }
             ids.remove(path)
-            val renamed = DocumentsContract.renameDocument(cr, tmp, name) ?: tmp
+            // some providers can't rename; reporting success anyway would record a base
+            // row for a file that only exists under the hidden temp name, and the next
+            // sync would read the real name as deleted here and delete it on Burrow
+            val renamed = DocumentsContract.renameDocument(cr, tmp, name)
+                ?: throw java.io.IOException("couldn't rename the downloaded file into place: $path")
             ids[path] = DocumentsContract.getDocumentId(renamed)
         } catch (e: Exception) {
             runCatching { DocumentsContract.deleteDocument(cr, tmp) }

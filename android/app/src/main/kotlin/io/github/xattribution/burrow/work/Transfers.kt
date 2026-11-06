@@ -113,12 +113,19 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     var size = t.size
                     if (size < 0) size = applicationContext.contentResolver.openInputStream(uri)?.use { it.skip(Long.MAX_VALUE) } ?: throw FileNotFoundException(t.name)
                     runCatching { setForeground(info("Sending ${t.name}", g.places.get(place)?.name.orEmpty(), 0, size)) }
-                    val open = { if (uri.scheme == "file") File(uri.path!!).source() else (applicationContext.contentResolver.openInputStream(uri) ?: throw FileNotFoundException(t.name)).source() }
-                    val path = g.places.fs(place).put(dir, t.name, size, t.mtime, open) { sent ->
-                        q.progress(sent, "", now(), t.id)
-                        g.transfers.changed.value++
+                    // a retried attempt mustn't re-send what already landed: puts rename on conflict, so that would make "name (2)" copies
+                    val target = if (dir.isEmpty()) t.name else "$dir/${t.name}"
+                    val landed = if (runAttemptCount > 0) runCatching { g.places.fs(place).stat(target) }.getOrNull() else null
+                    if (landed != null && !landed.dir && landed.size == size) {
+                        q.finish("done", target, size, now(), t.id)
+                    } else {
+                        val open = { if (uri.scheme == "file") File(uri.path!!).source() else (applicationContext.contentResolver.openInputStream(uri) ?: throw FileNotFoundException(t.name)).source() }
+                        val path = g.places.fs(place).put(dir, t.name, size, t.mtime, open) { sent ->
+                            q.progress(sent, "", now(), t.id)
+                            g.transfers.changed.value++
+                        }
+                        q.finish("done", path, size, now(), t.id)
                     }
-                    q.finish("done", path, size, now(), t.id)
                     if (uri.scheme == "file" && uri.path?.startsWith(applicationContext.cacheDir.path) == true) File(uri.path!!).parentFile?.deleteRecursively()
                 } else if (t.direction == "up") {
                     val uri = Uri.parse(t.local_uri)
@@ -195,6 +202,13 @@ class TransferWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 return
             }
             runCatching { setForeground(info(label, where, done, done + e.size)) }
+            // a retried attempt mustn't re-copy what already landed: puts rename on conflict, so that would make "name (2)" copies
+            val target = if (into.isEmpty()) e.name else "$into/${e.name}"
+            val landed = if (runAttemptCount > 0) runCatching { dst.stat(target) }.getOrNull() else null
+            if (landed != null && !landed.dir && landed.size == e.size) {
+                done += e.size
+                return
+            }
             dst.put(into, e.name, e.size, e.mtime * 1000, open = { openSource(src, e.path) }) { n ->
                 q.progress(done + n, "", System.currentTimeMillis() / 1000, id)
                 g.transfers.changed.value++
